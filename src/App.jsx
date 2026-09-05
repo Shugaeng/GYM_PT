@@ -15,6 +15,7 @@ import {
   Check,
   RotateCcw,
   PlayCircle,
+  Moon,
 } from "lucide-react";
 
 // ---------------------------------------------------------------------------
@@ -187,7 +188,7 @@ function computeRecommendation(logs, todayStr, level, restAlgorithm, scheduleSta
 // recommend tab would say by running the same rotation rule forward day-by-day.
 // A day with a real log is left untouched (ground truth always wins); a predicted
 // non-rest day is fed back in as a synthetic entry so later days in the same run see it.
-function simulateForecast(logs, level, monthStart, monthEnd, restAlgorithm, scheduleStart) {
+function simulateForecast(logs, level, monthStart, monthEnd, restAlgorithm, scheduleStart, restDays = {}) {
   const simLogs = { ...logs };
   const forecast = {};
   let cursor = addDays(monthStart, -65); // enough lookback for the classic/alternate rotation windows below
@@ -195,7 +196,9 @@ function simulateForecast(logs, level, monthStart, monthEnd, restAlgorithm, sche
   while (toDateStr(cursor) <= endStr) {
     const dateStr = toDateStr(cursor);
     const real = logs[dateStr];
-    if (!real || real.length === 0) {
+    if (restDays[dateStr]) {
+      // user explicitly marked this a rest day — ground truth, nothing to predict
+    } else if (!real || real.length === 0) {
       const rec = computeRecommendation(simLogs, dateStr, level, restAlgorithm, scheduleStart);
       if (rec.reason === "not-started") {
         // nothing to predict before the schedule's own start date
@@ -227,6 +230,7 @@ export default function PTApp() {
   const [logs, setLogs] = useState({});
   const [adjustments, setAdjustments] = useState({});
   const [weightLog, setWeightLog] = useState({});
+  const [restDays, setRestDays] = useState({});
   const [loaded, setLoaded] = useState(false);
   const [saveNote, setSaveNote] = useState("");
 
@@ -247,6 +251,10 @@ export default function PTApp() {
       try {
         const w = await storage.get("pt-weightlog");
         if (w) setWeightLog(JSON.parse(w.value));
+      } catch (e) {}
+      try {
+        const r = await storage.get("pt-restdays");
+        if (r) setRestDays(JSON.parse(r.value));
       } catch (e) {}
       setLoaded(true);
     })();
@@ -292,6 +300,14 @@ export default function PTApp() {
     (dateStr, entry) => {
       const next = { ...logs, [dateStr]: [...(logs[dateStr] || []), { id: uid(), ...entry }] };
       persistLogs(next);
+      // an actual workout contradicts a rest mark on the same day
+      setRestDays((prev) => {
+        if (!prev[dateStr]) return prev;
+        const nextRest = { ...prev };
+        delete nextRest[dateStr];
+        storage.set("pt-restdays", JSON.stringify(nextRest)).catch(() => {});
+        return nextRest;
+      });
     },
     [logs, persistLogs]
   );
@@ -303,6 +319,16 @@ export default function PTApp() {
     },
     [logs, persistLogs]
   );
+
+  const toggleRestDay = useCallback((dateStr) => {
+    setRestDays((prev) => {
+      const next = { ...prev };
+      if (next[dateStr]) delete next[dateStr];
+      else next[dateStr] = true;
+      storage.set("pt-restdays", JSON.stringify(next)).catch(() => {});
+      return next;
+    });
+  }, []);
 
   if (!loaded) {
     return (
@@ -333,9 +359,11 @@ export default function PTApp() {
             logs={logs}
             settings={settings}
             weightLog={weightLog}
+            restDays={restDays}
             onAdd={addExercise}
             onRemove={removeExercise}
             onSetWeight={setWeightForDate}
+            onToggleRest={toggleRestDay}
           />
         )}
         {tab === "recommend" && (
@@ -380,7 +408,7 @@ function TabButton({ icon: Icon, label, active, onClick }) {
 // Calendar tab
 // ---------------------------------------------------------------------------
 
-function CalendarTab({ logs, settings, weightLog, onAdd, onRemove, onSetWeight }) {
+function CalendarTab({ logs, settings, weightLog, restDays, onAdd, onRemove, onSetWeight, onToggleRest }) {
   const todayStr = toDateStr(new Date());
   const [viewDate, setViewDate] = useState(new Date());
   const [selected, setSelected] = useState(todayStr);
@@ -406,9 +434,10 @@ function CalendarTab({ logs, settings, weightLog, onAdd, onRemove, onSetWeight }
         firstDay,
         lastDay,
         settings.restAlgorithm || "classic",
-        settings.scheduleStart
+        settings.scheduleStart,
+        restDays
       ),
-    [logs, settings.level, settings.restAlgorithm, settings.scheduleStart, year, month]
+    [logs, settings.level, settings.restAlgorithm, settings.scheduleStart, year, month, restDays]
   );
 
   const cells = [];
@@ -416,6 +445,7 @@ function CalendarTab({ logs, settings, weightLog, onAdd, onRemove, onSetWeight }
   for (let d = 1; d <= daysInMonth; d++) cells.push(d);
 
   const entries = logs[selected] || [];
+  const isSelectedRest = Boolean(restDays[selected]);
   const prevWeight = findPrevWeight(weightLog, selected);
   const weightDelta = weightLog[selected] && prevWeight ? +(Number(weightLog[selected]) - Number(prevWeight)).toFixed(1) : null;
   const dayCalories = estimateCalories(entries, settings.weight);
@@ -445,12 +475,13 @@ function CalendarTab({ logs, settings, weightLog, onAdd, onRemove, onSetWeight }
           if (d === null) return <div key={i} />;
           const dateStr = `${year}-${pad(month + 1)}-${pad(d)}`;
           const has = (logs[dateStr] || []).length > 0;
+          const isRestMarked = Boolean(restDays[dateStr]);
           const isToday = dateStr === todayStr;
           const isSel = dateStr === selected;
           const w = weightLog[dateStr];
           const prevW = w ? findPrevWeight(weightLog, dateStr) : null;
           const delta = w && prevW ? +(Number(w) - Number(prevW)).toFixed(1) : null;
-          const fc = !has ? forecast[dateStr] : null;
+          const fc = !has && !isRestMarked ? forecast[dateStr] : null;
           return (
             <button
               key={i}
@@ -465,18 +496,20 @@ function CalendarTab({ logs, settings, weightLog, onAdd, onRemove, onSetWeight }
                     ? "border border-orange-500 text-orange-400"
                     : has
                     ? "bg-zinc-800 text-zinc-100 font-medium"
+                    : isRestMarked
+                    ? "bg-zinc-900 border border-zinc-700 text-zinc-400"
                     : "text-zinc-600"
                 }`}
               >
                 {d}
               </span>
-              <span className={`w-1 h-1 rounded-full ${has ? "bg-orange-500" : "bg-transparent"}`} />
+              <span className={`w-1 h-1 rounded-full ${has ? "bg-orange-500" : isRestMarked ? "bg-zinc-500" : "bg-transparent"}`} />
               <span
                 className={`text-[8px] leading-none whitespace-nowrap h-2.5 ${
-                  fc ? (fc.rest ? "text-zinc-600" : "text-teal-500/70") : "invisible"
+                  isRestMarked ? "text-zinc-400" : fc ? (fc.rest ? "text-zinc-600" : "text-teal-500/70") : "invisible"
                 }`}
               >
-                {fc ? (fc.rest ? "휴식" : fc.bodyPart) : "-"}
+                {isRestMarked ? "휴식" : fc ? (fc.rest ? "휴식" : fc.bodyPart) : "-"}
               </span>
               <span
                 className={`text-[9px] leading-none whitespace-nowrap h-3 ${
@@ -498,16 +531,29 @@ function CalendarTab({ logs, settings, weightLog, onAdd, onRemove, onSetWeight }
         <div className="col-span-3">
           <div className="flex items-center justify-between mb-3">
             <div className="text-sm text-zinc-400">{selected} 기록</div>
-            <button
-              onClick={() => setShowForm((s) => !s)}
-              className="flex items-center gap-1 text-xs text-orange-500 font-medium"
-            >
-              {showForm ? <X className="w-3.5 h-3.5" /> : <Plus className="w-3.5 h-3.5" />}
-              {showForm ? "닫기" : "추가"}
-            </button>
+            <div className="flex items-center gap-3">
+              {entries.length === 0 && (
+                <button
+                  onClick={() => { onToggleRest(selected); setShowForm(false); }}
+                  className={`flex items-center gap-1 text-xs font-medium ${isSelectedRest ? "text-zinc-400" : "text-teal-400"}`}
+                >
+                  {isSelectedRest ? <X className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
+                  {isSelectedRest ? "휴식 취소" : "휴식으로 표시"}
+                </button>
+              )}
+              {!isSelectedRest && (
+                <button
+                  onClick={() => setShowForm((s) => !s)}
+                  className="flex items-center gap-1 text-xs text-orange-500 font-medium"
+                >
+                  {showForm ? <X className="w-3.5 h-3.5" /> : <Plus className="w-3.5 h-3.5" />}
+                  {showForm ? "닫기" : "추가"}
+                </button>
+              )}
+            </div>
           </div>
 
-          {showForm && (
+          {showForm && !isSelectedRest && (
             <AddExerciseForm
               customEquipment={settings.customEquipment || []}
               onSubmit={(entry) => { onAdd(selected, entry); setShowForm(false); }}
@@ -515,7 +561,16 @@ function CalendarTab({ logs, settings, weightLog, onAdd, onRemove, onSetWeight }
           )}
 
           {entries.length === 0 && !showForm && (
-            <div className="text-sm text-zinc-600 py-6 text-center">아직 기록된<br />운동이 없어요.</div>
+            <div className="text-sm text-zinc-600 py-6 text-center">
+              {isSelectedRest ? (
+                <>
+                  <Moon className="w-4 h-4 mx-auto mb-1.5 text-zinc-600" />
+                  쉬는 날로<br />표시했어요.
+                </>
+              ) : (
+                <>아직 기록된<br />운동이 없어요.</>
+              )}
+            </div>
           )}
 
           <div className="space-y-2">
