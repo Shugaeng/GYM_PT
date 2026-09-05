@@ -149,6 +149,32 @@ function computeRecommendation(logs, todayStr, level) {
   return { rest: false, bodyPart, lastTrained, restDaysInWeek, minRestPerWeek };
 }
 
+// For days that have no actual log yet (past gaps or future dates), predict what the
+// recommend tab would say by running the same rotation rule forward day-by-day.
+// A day with a real log is left untouched (ground truth always wins); a predicted
+// non-rest day is fed back in as a synthetic entry so later days in the same run see it.
+function simulateForecast(logs, level, monthStart, monthEnd) {
+  const simLogs = { ...logs };
+  const forecast = {};
+  let cursor = addDays(monthStart, -35); // enough lookback for the 30-day/7-day windows below
+  const endStr = toDateStr(monthEnd);
+  while (toDateStr(cursor) <= endStr) {
+    const dateStr = toDateStr(cursor);
+    const real = logs[dateStr];
+    if (!real || real.length === 0) {
+      const rec = computeRecommendation(simLogs, dateStr, level);
+      if (rec.rest) {
+        forecast[dateStr] = { rest: true };
+      } else {
+        forecast[dateStr] = { rest: false, bodyPart: rec.bodyPart };
+        simLogs[dateStr] = [{ bodyPart: rec.bodyPart }];
+      }
+    }
+    cursor = addDays(cursor, 1);
+  }
+  return forecast;
+}
+
 export default function PTApp() {
   const [tab, setTab] = useState("recommend");
   const [settings, setSettings] = useState({ weight: "", height: "", difficultParts: [], equipment: [], customEquipment: [], customExercises: [], level: "중급" });
@@ -324,6 +350,12 @@ function CalendarTab({ logs, settings, weightLog, onAdd, onRemove, onSetWeight }
   const firstDay = new Date(year, month, 1);
   const startOffset = firstDay.getDay();
   const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const lastDay = new Date(year, month + 1, 0);
+
+  const forecast = useMemo(
+    () => simulateForecast(logs, settings.level || "중급", firstDay, lastDay),
+    [logs, settings.level, year, month]
+  );
 
   const cells = [];
   for (let i = 0; i < startOffset; i++) cells.push(null);
@@ -364,6 +396,7 @@ function CalendarTab({ logs, settings, weightLog, onAdd, onRemove, onSetWeight }
           const w = weightLog[dateStr];
           const prevW = w ? findPrevWeight(weightLog, dateStr) : null;
           const delta = w && prevW ? +(Number(w) - Number(prevW)).toFixed(1) : null;
+          const fc = !has ? forecast[dateStr] : null;
           return (
             <button
               key={i}
@@ -385,6 +418,13 @@ function CalendarTab({ logs, settings, weightLog, onAdd, onRemove, onSetWeight }
               </span>
               <span className={`w-1 h-1 rounded-full ${has ? "bg-orange-500" : "bg-transparent"}`} />
               <span
+                className={`text-[8px] leading-none whitespace-nowrap h-2.5 ${
+                  fc ? (fc.rest ? "text-zinc-600" : "text-teal-500/70") : "invisible"
+                }`}
+              >
+                {fc ? (fc.rest ? "휴식" : fc.bodyPart) : "-"}
+              </span>
+              <span
                 className={`text-[9px] leading-none whitespace-nowrap h-3 ${
                   delta === null ? "invisible" : delta > 0 ? "text-red-400" : delta < 0 ? "text-teal-400" : "text-zinc-500"
                 }`}
@@ -394,6 +434,10 @@ function CalendarTab({ logs, settings, weightLog, onAdd, onRemove, onSetWeight }
             </button>
           );
         })}
+      </div>
+
+      <div className="text-[10px] text-zinc-600 mb-5 -mt-4">
+        회색/청록 글자는 예상 운동·휴식일이에요 (아직 기록 안 한 날짜 기준 예측). 실제로 기록하면 그 이후 예측도 자동으로 바뀌어요.
       </div>
 
       <div className="border-t border-zinc-900 pt-4 grid grid-cols-5 gap-4">
