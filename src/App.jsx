@@ -111,7 +111,23 @@ function findPrevWeight(weightLog, dateStr) {
   return weightLog[dates[dates.length - 1]];
 }
 
-function computeRecommendation(logs, todayStr, level) {
+function lastTrainedMap(logs, today, lookbackDays) {
+  const lastTrained = {};
+  BODY_PARTS.forEach((bp) => (lastTrained[bp] = Infinity));
+  for (let i = 1; i <= lookbackDays; i++) {
+    const d = toDateStr(addDays(today, -i));
+    const entries = logs[d];
+    if (!entries) continue;
+    entries.forEach((e) => {
+      if (lastTrained[e.bodyPart] === Infinity) lastTrained[e.bodyPart] = i;
+    });
+  }
+  return lastTrained;
+}
+
+// Original algorithm: weekly full-rest quota (by level) + per-muscle 48h recovery, rotating
+// through whichever body part has rested longest.
+function computeRecommendationClassic(logs, todayStr, level) {
   const today = new Date(todayStr + "T00:00:00");
   const minRestPerWeek = WEEKLY_MIN_REST[level] ?? 1;
 
@@ -123,47 +139,67 @@ function computeRecommendation(logs, todayStr, level) {
   }
 
   if (restDaysInWeek < minRestPerWeek) {
-    return { rest: true, reason: "weekly", restDaysInWeek, minRestPerWeek };
+    return { rest: true, reason: "weekly", restDaysInWeek, minRestPerWeek, algorithm: "classic" };
   }
 
-  // days since each body part was last trained
-  const lastTrained = {};
-  BODY_PARTS.forEach((bp) => (lastTrained[bp] = Infinity));
-  for (let i = 1; i <= 30; i++) {
-    const d = toDateStr(addDays(today, -i));
-    const entries = logs[d];
-    if (!entries) continue;
-    entries.forEach((e) => {
-      if (lastTrained[e.bodyPart] === Infinity) lastTrained[e.bodyPart] = i;
-    });
-  }
-
-  // exclude any muscle group trained within the last ~48h so it gets proper recovery
+  // days since each body part was last trained, exclude any trained within the last ~48h
+  const lastTrained = lastTrainedMap(logs, today, 30);
   const eligible = BODY_PARTS.filter((bp) => lastTrained[bp] >= MUSCLE_RECOVERY_DAYS);
 
   if (eligible.length === 0) {
-    return { rest: true, reason: "recovery", restDaysInWeek, minRestPerWeek };
+    return { rest: true, reason: "recovery", restDaysInWeek, minRestPerWeek, algorithm: "classic" };
   }
 
   const bodyPart = eligible.reduce((a, b) => (lastTrained[b] > lastTrained[a] ? b : a));
-  return { rest: false, bodyPart, lastTrained, restDaysInWeek, minRestPerWeek };
+  return { rest: false, bodyPart, lastTrained, restDaysInWeek, minRestPerWeek, algorithm: "classic" };
+}
+
+// Shift-work algorithm: fixed alternating pattern anchored to a start date —
+// start date = workout, +1 day = rest, +2 days = workout, +3 = rest, and so on.
+// On a workout day, still rotate to whichever body part has rested longest.
+function computeRecommendationAlternate(logs, todayStr, scheduleStart) {
+  const today = new Date(todayStr + "T00:00:00");
+  const startStr = scheduleStart || todayStr;
+  const start = new Date(startStr + "T00:00:00");
+  const diffDays = Math.round((today - start) / 86400000);
+
+  if (diffDays < 0) {
+    return { rest: true, reason: "not-started", algorithm: "alternate", scheduleStart: startStr };
+  }
+  if (diffDays % 2 !== 0) {
+    return { rest: true, reason: "alternate", algorithm: "alternate", scheduleStart: startStr };
+  }
+
+  // wider lookback since a body part only comes up roughly every 2×(#body parts) days
+  const lastTrained = lastTrainedMap(logs, today, 60);
+  const bodyPart = BODY_PARTS.reduce((a, b) => (lastTrained[b] > lastTrained[a] ? b : a));
+  return { rest: false, bodyPart, lastTrained, algorithm: "alternate", scheduleStart: startStr };
+}
+
+function computeRecommendation(logs, todayStr, level, restAlgorithm, scheduleStart) {
+  if (restAlgorithm === "alternate") {
+    return computeRecommendationAlternate(logs, todayStr, scheduleStart);
+  }
+  return computeRecommendationClassic(logs, todayStr, level);
 }
 
 // For days that have no actual log yet (past gaps or future dates), predict what the
 // recommend tab would say by running the same rotation rule forward day-by-day.
 // A day with a real log is left untouched (ground truth always wins); a predicted
 // non-rest day is fed back in as a synthetic entry so later days in the same run see it.
-function simulateForecast(logs, level, monthStart, monthEnd) {
+function simulateForecast(logs, level, monthStart, monthEnd, restAlgorithm, scheduleStart) {
   const simLogs = { ...logs };
   const forecast = {};
-  let cursor = addDays(monthStart, -35); // enough lookback for the 30-day/7-day windows below
+  let cursor = addDays(monthStart, -65); // enough lookback for the classic/alternate rotation windows below
   const endStr = toDateStr(monthEnd);
   while (toDateStr(cursor) <= endStr) {
     const dateStr = toDateStr(cursor);
     const real = logs[dateStr];
     if (!real || real.length === 0) {
-      const rec = computeRecommendation(simLogs, dateStr, level);
-      if (rec.rest) {
+      const rec = computeRecommendation(simLogs, dateStr, level, restAlgorithm, scheduleStart);
+      if (rec.reason === "not-started") {
+        // nothing to predict before the schedule's own start date
+      } else if (rec.rest) {
         forecast[dateStr] = { rest: true };
       } else {
         forecast[dateStr] = { rest: false, bodyPart: rec.bodyPart };
@@ -177,7 +213,17 @@ function simulateForecast(logs, level, monthStart, monthEnd) {
 
 export default function PTApp() {
   const [tab, setTab] = useState("recommend");
-  const [settings, setSettings] = useState({ weight: "", height: "", difficultParts: [], equipment: [], customEquipment: [], customExercises: [], level: "중급" });
+  const [settings, setSettings] = useState({
+    weight: "",
+    height: "",
+    difficultParts: [],
+    equipment: [],
+    customEquipment: [],
+    customExercises: [],
+    level: "중급",
+    restAlgorithm: "classic",
+    scheduleStart: "",
+  });
   const [logs, setLogs] = useState({});
   const [adjustments, setAdjustments] = useState({});
   const [weightLog, setWeightLog] = useState({});
@@ -353,8 +399,16 @@ function CalendarTab({ logs, settings, weightLog, onAdd, onRemove, onSetWeight }
   const lastDay = new Date(year, month + 1, 0);
 
   const forecast = useMemo(
-    () => simulateForecast(logs, settings.level || "중급", firstDay, lastDay),
-    [logs, settings.level, year, month]
+    () =>
+      simulateForecast(
+        logs,
+        settings.level || "중급",
+        firstDay,
+        lastDay,
+        settings.restAlgorithm || "classic",
+        settings.scheduleStart
+      ),
+    [logs, settings.level, settings.restAlgorithm, settings.scheduleStart, year, month]
   );
 
   const cells = [];
@@ -641,7 +695,12 @@ function AddExerciseForm({ onSubmit, customEquipment = [] }) {
 function RecommendTab({ logs, settings, adjustments, onAdd, onFeedback, onLevelChange }) {
   const todayStr = toDateStr(new Date());
   const level = settings.level || "중급";
-  const rec = useMemo(() => computeRecommendation(logs, todayStr, level), [logs, todayStr, level]);
+  const restAlgorithm = settings.restAlgorithm || "classic";
+  const scheduleStart = settings.scheduleStart;
+  const rec = useMemo(
+    () => computeRecommendation(logs, todayStr, level, restAlgorithm, scheduleStart),
+    [logs, todayStr, level, restAlgorithm, scheduleStart]
+  );
   const difficultParts = settings.difficultParts || [];
   const equipment = settings.equipment || [];
   const [pending, setPending] = useState({});
@@ -662,26 +721,40 @@ function RecommendTab({ logs, settings, adjustments, onAdd, onFeedback, onLevelC
     </div>
   );
 
-  const weeklyRestNote = (
-    <div className="text-xs text-zinc-500 mb-5">
-      이번 주 완전휴식 <span className="text-teal-400 font-semibold">{rec.restDaysInWeek}</span>일 (권장 <span className="text-orange-400 font-semibold">{rec.minRestPerWeek}</span>일 이상)
-    </div>
-  );
+  const restNote =
+    restAlgorithm === "alternate" ? (
+      <div className="text-xs text-zinc-500 mb-5">
+        격일 운동 모드 · 시작일 <span className="text-teal-400 font-semibold">{rec.scheduleStart}</span> 기준 하루 운동, 하루 휴식
+      </div>
+    ) : (
+      <div className="text-xs text-zinc-500 mb-5">
+        이번 주 완전휴식 <span className="text-teal-400 font-semibold">{rec.restDaysInWeek}</span>일 (권장 <span className="text-orange-400 font-semibold">{rec.minRestPerWeek}</span>일 이상)
+      </div>
+    );
 
   if (rec.rest) {
-    const isWeekly = rec.reason === "weekly";
     return (
       <div className="px-5 pt-6">
         <div style={{ fontFamily: "Oswald, sans-serif" }} className="text-lg font-medium mb-1">오늘의 추천</div>
         {levelToggle}
-        {weeklyRestNote}
+        {restNote}
         <div className="bg-zinc-900 rounded-xl p-5">
           <div className="text-orange-500 font-semibold mb-2">
-            {isWeekly ? "오늘은 완전휴식일이에요" : "오늘은 회복이 필요해요"}
+            {rec.reason === "weekly"
+              ? "오늘은 완전휴식일이에요"
+              : rec.reason === "alternate"
+              ? "오늘은 쉬는 날이에요"
+              : rec.reason === "not-started"
+              ? "격일 운동 시작일 전이에요"
+              : "오늘은 회복이 필요해요"}
           </div>
           <p className="text-sm text-zinc-400 leading-relaxed">
-            {isWeekly
+            {rec.reason === "weekly"
               ? `${level} 기준 일주일에 최소 ${rec.minRestPerWeek}일은 완전히 쉬는 게 좋아요. 이번 주는 아직 ${rec.restDaysInWeek}일밖에 못 쉬었으니, 오늘은 근력 운동 없이 가볍게 산책이나 스트레칭 정도로 몸을 회복시켜 주세요.`
+              : rec.reason === "alternate"
+              ? `설정한 격일 패턴(운동 → 휴식 → 운동 → 휴식)에서 오늘은 쉬는 날이에요. 내일은 다시 운동하는 날이에요.`
+              : rec.reason === "not-started"
+              ? `설정 탭에서 지정한 시작일(${rec.scheduleStart})이 아직 안 됐어요. 그날부터 하루 운동, 하루 휴식이 시작돼요.`
               : "최근 훈련한 부위들이 아직 48시간 회복 시간을 다 채우지 못했어요. 근육은 자극받은 후 48~72시간 정도 쉬어야 제대로 회복되니, 오늘은 가벼운 유산소나 스트레칭으로 대신해 주세요."}
           </p>
         </div>
@@ -721,9 +794,9 @@ function RecommendTab({ logs, settings, adjustments, onAdd, onFeedback, onLevelC
     <div className="px-5 pt-6">
       <div style={{ fontFamily: "Oswald, sans-serif" }} className="text-lg font-medium mb-1">오늘의 추천</div>
       {levelToggle}
-      {weeklyRestNote}
+      {restNote}
       <div className="text-xs text-zinc-500 mb-5">
-        {rec.lastTrained[bodyPart] === Infinity ? "아직 기록이 없는 부위예요" : `${rec.lastTrained[bodyPart]}일 전에 마지막으로 훈련했어요 (48시간 이상 지나 회복됐어요)`}
+        {rec.lastTrained[bodyPart] === Infinity ? "아직 기록이 없는 부위예요" : `${rec.lastTrained[bodyPart]}일 전에 마지막으로 훈련했어요`}
       </div>
 
       <div className="bg-zinc-900 rounded-xl p-5 mb-4">
@@ -835,6 +908,9 @@ function SettingsTab({ settings, onSave, note, setNote }) {
   const [newExSets, setNewExSets] = useState("3");
   const [newExReps, setNewExReps] = useState("12");
   const [newExEquipment, setNewExEquipment] = useState([]);
+  const todayStr = toDateStr(new Date());
+  const [restAlgorithm, setRestAlgorithm] = useState(settings.restAlgorithm || "classic");
+  const [scheduleStart, setScheduleStart] = useState(settings.scheduleStart || todayStr);
 
   const toggleJoint = (j) => {
     setDifficultParts((prev) => (prev.includes(j) ? prev.filter((p) => p !== j) : [...prev, j]));
@@ -1090,8 +1166,49 @@ function SettingsTab({ settings, onSave, note, setNote }) {
         <p className="text-[11px] text-zinc-600 mt-2">여기서 추가한 운동은 해당 부위가 추천될 때 추천 탭 목록에 같이 나와요. 필요 장비를 골랐는데 보유 기구에 없으면, 대체 동작 없이 "장비 없음" 주의만 표시돼요.</p>
       </div>
 
+      <div className="mb-6">
+        <label className="text-xs text-zinc-500 mb-2 block">휴식일 알고리즘</label>
+        <div className="space-y-2">
+          <button
+            onClick={() => setRestAlgorithm("classic")}
+            className={`w-full text-left rounded-lg p-3 border ${
+              restAlgorithm === "classic" ? "border-orange-500 bg-zinc-900" : "border-transparent bg-zinc-900"
+            }`}
+          >
+            <div className={`text-sm font-medium ${restAlgorithm === "classic" ? "text-orange-400" : "text-zinc-200"}`}>기존 방식</div>
+            <div className="text-[11px] text-zinc-500 mt-0.5">주간 최소 완전휴식일 + 부위별 48시간 회복을 기준으로 자동 판단해요.</div>
+          </button>
+          <button
+            onClick={() => setRestAlgorithm("alternate")}
+            className={`w-full text-left rounded-lg p-3 border ${
+              restAlgorithm === "alternate" ? "border-orange-500 bg-zinc-900" : "border-transparent bg-zinc-900"
+            }`}
+          >
+            <div className={`text-sm font-medium ${restAlgorithm === "alternate" ? "text-orange-400" : "text-zinc-200"}`}>격일 운동 (하루 운동 · 하루 휴식)</div>
+            <div className="text-[11px] text-zinc-500 mt-0.5">시작일 기준 운동한 다음 날은 무조건 휴식, 그다음 날 다시 운동 — 근무 형태에 맞춘 고정 패턴이에요.</div>
+          </button>
+        </div>
+
+        {restAlgorithm === "alternate" && (
+          <div className="mt-3">
+            <label className="text-[11px] text-zinc-500 mb-1.5 block">운동 시작일 (이 날이 첫 운동일이에요)</label>
+            <input
+              type="date"
+              value={scheduleStart}
+              onChange={(e) => setScheduleStart(e.target.value)}
+              className="w-full bg-zinc-900 rounded-md px-3 py-2.5 text-sm text-zinc-100 outline-none focus:ring-1 focus:ring-orange-500"
+            />
+            <p className="text-[11px] text-zinc-600 mt-1.5">이 날짜 기준 +1일은 휴식, +2일은 운동, +3일은 휴식 … 순서로 반복돼요.</p>
+          </div>
+        )}
+      </div>
+
       <button
-        onClick={() => { onSave({ weight, height, difficultParts, equipment, customEquipment, customExercises }); setNote("저장됐어요"); setTimeout(() => setNote(""), 1500); }}
+        onClick={() => {
+          onSave({ weight, height, difficultParts, equipment, customEquipment, customExercises, restAlgorithm, scheduleStart });
+          setNote("저장됐어요");
+          setTimeout(() => setNote(""), 1500);
+        }}
         className="w-full bg-orange-500 text-zinc-950 rounded-md py-2.5 text-sm font-semibold flex items-center justify-center gap-1.5"
       >
         <Check className="w-4 h-4" /> 저장
