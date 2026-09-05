@@ -39,10 +39,11 @@ const EQUIPMENT_CATEGORIES = [
 ];
 const EQUIPMENT_OPTIONS = EQUIPMENT_CATEGORIES.flatMap((c) => c.items);
 const ADD_BODY_PARTS = [...BODY_PARTS, "유산소"];
-function equipmentOptionsFor(bodyPart) {
+function equipmentOptionsFor(bodyPart, customEquipment = []) {
   const common = EQUIPMENT_CATEGORIES.find((c) => c.category === "프리웨이트 · 공용")?.items || [];
   const specific = EQUIPMENT_CATEGORIES.find((c) => c.category === bodyPart)?.items || [];
-  return [...specific, ...common];
+  const extra = customEquipment.filter((eq) => !specific.includes(eq) && !common.includes(eq));
+  return [...specific, ...common, ...extra];
 }
 
 const EXERCISES = {
@@ -150,7 +151,7 @@ function computeRecommendation(logs, todayStr, level) {
 
 export default function PTApp() {
   const [tab, setTab] = useState("recommend");
-  const [settings, setSettings] = useState({ weight: "", height: "", difficultParts: [], equipment: [], level: "중급" });
+  const [settings, setSettings] = useState({ weight: "", height: "", difficultParts: [], equipment: [], customEquipment: [], customExercises: [], level: "중급" });
   const [logs, setLogs] = useState({});
   const [adjustments, setAdjustments] = useState({});
   const [weightLog, setWeightLog] = useState({});
@@ -410,6 +411,7 @@ function CalendarTab({ logs, settings, weightLog, onAdd, onRemove, onSetWeight }
 
           {showForm && (
             <AddExerciseForm
+              customEquipment={settings.customEquipment || []}
               onSubmit={(entry) => { onAdd(selected, entry); setShowForm(false); }}
             />
           )}
@@ -518,7 +520,7 @@ function WeightChart({ weightLog }) {
   );
 }
 
-function AddExerciseForm({ onSubmit }) {
+function AddExerciseForm({ onSubmit, customEquipment = [] }) {
   const [bodyPart, setBodyPart] = useState(ADD_BODY_PARTS[0]);
   const [name, setName] = useState("");
   const [sets, setSets] = useState("3");
@@ -526,7 +528,7 @@ function AddExerciseForm({ onSubmit }) {
   const [weight, setWeight] = useState("");
   const [equipmentUsed, setEquipmentUsed] = useState(null);
 
-  const equipmentChoices = equipmentOptionsFor(bodyPart);
+  const equipmentChoices = equipmentOptionsFor(bodyPart, customEquipment);
 
   return (
     <div className="bg-zinc-900 rounded-lg p-4 mb-3 space-y-3">
@@ -644,14 +646,28 @@ function RecommendTab({ logs, settings, adjustments, onAdd, onFeedback, onLevelC
   }
 
   const bodyPart = rec.bodyPart;
-  const list = EXERCISES[bodyPart];
+  const customForBodyPart = (settings.customExercises || [])
+    .filter((ce) => ce.bodyPart === bodyPart)
+    .map((ce) => ({
+      name: ce.name,
+      sets: Number(ce.sets) || 3,
+      reps: ce.reps || "12",
+      strain: [],
+      equipment: ce.equipment || [],
+      alt: null,
+      isCustom: true,
+    }));
+  const list = [...EXERCISES[bodyPart], ...customForBodyPart];
 
   const items = list.map((ex) => {
-    const cautionJoints = ex.strain.filter((s) => difficultParts.includes(s));
+    const strain = ex.strain || [];
+    const cautionJoints = strain.filter((s) => difficultParts.includes(s));
     const missingEquip = (ex.equipment || []).filter((e) => !equipment.includes(e));
     const caution = cautionJoints.length > 0;
     const equipSwap = missingEquip.length > 0;
-    const chosen = caution || equipSwap ? { ...ex.alt, bodyPart, caution, cautionJoints, equipSwap } : { ...ex, bodyPart, caution: false, equipSwap: false };
+    const swapped = (caution || equipSwap) && Boolean(ex.alt);
+    const base = swapped ? ex.alt : ex;
+    const chosen = { ...base, bodyPart, caution, cautionJoints, equipSwap, swapped, isCustom: ex.isCustom };
     const feedbackAdj = adjustments[chosen.name] || 0;
     const levelAdj = LEVEL_SET_ADJUST[level] ?? 0;
     return { ...chosen, sets: Math.max(1, chosen.sets + feedbackAdj + levelAdj) };
@@ -681,7 +697,10 @@ function RecommendTab({ logs, settings, adjustments, onAdd, onFeedback, onLevelC
           <div key={idx} className="bg-zinc-900 rounded-lg px-4 py-3">
             <div className="flex items-start justify-between gap-3">
               <div className="flex-1">
-                <div className="text-sm font-medium text-zinc-100">{it.name}</div>
+                <div className="text-sm font-medium text-zinc-100">
+                  {it.name}
+                  {it.isCustom && <span className="ml-1.5 text-[9px] text-teal-400 align-middle">직접추가</span>}
+                </div>
                 <div className="text-xs text-zinc-500 mt-0.5">{it.sets}세트 × {it.reps}</div>
                 {it.equipment && it.equipment.length > 0 && (
                   <div className="text-[11px] text-zinc-600 mt-1">필요 장비: {it.equipment.join(", ")}</div>
@@ -689,11 +708,17 @@ function RecommendTab({ logs, settings, adjustments, onAdd, onFeedback, onLevelC
                 {(it.caution || it.equipSwap) && (
                   <div className="flex items-center gap-1 mt-1.5 text-[11px] text-amber-400">
                     <AlertTriangle className="w-3 h-3" />
-                    {it.caution && it.equipSwap
-                      ? `${it.cautionJoints.join(", ")} 부담 및 보유 장비에 맞춘 대체 동작이에요`
+                    {it.swapped
+                      ? it.caution && it.equipSwap
+                        ? `${it.cautionJoints.join(", ")} 부담 및 보유 장비에 맞춘 대체 동작이에요`
+                        : it.caution
+                        ? `${it.cautionJoints.join(", ")} 부담 적은 대체 동작이에요`
+                        : "보유 장비에 맞춘 대체 동작이에요"
+                      : it.caution && it.equipSwap
+                      ? `${it.cautionJoints.join(", ")} 부담이 될 수 있고, 필요 장비도 없어요 (직접 만든 운동이라 대체 동작은 없어요)`
                       : it.caution
-                      ? `${it.cautionJoints.join(", ")} 부담 적은 대체 동작이에요`
-                      : "보유 장비에 맞춘 대체 동작이에요"}
+                      ? `${it.cautionJoints.join(", ")} 부담이 될 수 있어요 (직접 만든 운동이라 대체 동작은 없어요)`
+                      : "필요 장비가 없어요 (직접 만든 운동이라 대체 동작은 없어요)"}
                   </div>
                 )}
                 <a
@@ -758,6 +783,14 @@ function SettingsTab({ settings, onSave, note, setNote }) {
   const [height, setHeight] = useState(settings.height || "");
   const [difficultParts, setDifficultParts] = useState(settings.difficultParts || []);
   const [equipment, setEquipment] = useState(settings.equipment || []);
+  const [customEquipment, setCustomEquipment] = useState(settings.customEquipment || []);
+  const [newEquipment, setNewEquipment] = useState("");
+  const [customExercises, setCustomExercises] = useState(settings.customExercises || []);
+  const [newExBodyPart, setNewExBodyPart] = useState(BODY_PARTS[0]);
+  const [newExName, setNewExName] = useState("");
+  const [newExSets, setNewExSets] = useState("3");
+  const [newExReps, setNewExReps] = useState("12");
+  const [newExEquipment, setNewExEquipment] = useState([]);
 
   const toggleJoint = (j) => {
     setDifficultParts((prev) => (prev.includes(j) ? prev.filter((p) => p !== j) : [...prev, j]));
@@ -765,6 +798,46 @@ function SettingsTab({ settings, onSave, note, setNote }) {
 
   const toggleEquipment = (eq) => {
     setEquipment((prev) => (prev.includes(eq) ? prev.filter((p) => p !== eq) : [...prev, eq]));
+  };
+
+  const addCustomEquipment = () => {
+    const name = newEquipment.trim();
+    if (!name) return;
+    const alreadyExists = customEquipment.includes(name) || EQUIPMENT_OPTIONS.includes(name);
+    if (!alreadyExists) setCustomEquipment((prev) => [...prev, name]);
+    if (!equipment.includes(name)) setEquipment((prev) => [...prev, name]);
+    setNewEquipment("");
+  };
+
+  const removeCustomEquipment = (eq) => {
+    setCustomEquipment((prev) => prev.filter((p) => p !== eq));
+    setEquipment((prev) => prev.filter((p) => p !== eq));
+  };
+
+  const toggleNewExEquipment = (eq) => {
+    setNewExEquipment((prev) => (prev.includes(eq) ? prev.filter((p) => p !== eq) : [...prev, eq]));
+  };
+
+  const addCustomExercise = () => {
+    const name = newExName.trim();
+    if (!name) return;
+    const entry = {
+      id: uid(),
+      name,
+      bodyPart: newExBodyPart,
+      sets: Number(newExSets) || 3,
+      reps: newExReps.trim() || "12",
+      equipment: newExEquipment,
+    };
+    setCustomExercises((prev) => [...prev, entry]);
+    setNewExName("");
+    setNewExSets("3");
+    setNewExReps("12");
+    setNewExEquipment([]);
+  };
+
+  const removeCustomExercise = (id) => {
+    setCustomExercises((prev) => prev.filter((ce) => ce.id !== id));
   };
 
   const bmi = weight && height ? (Number(weight) / ((Number(height) / 100) ** 2)).toFixed(1) : null;
@@ -844,11 +917,137 @@ function SettingsTab({ settings, onSave, note, setNote }) {
             </div>
           ))}
         </div>
+
+        {customEquipment.length > 0 && (
+          <div className="mt-3">
+            <div className="text-[11px] text-zinc-600 mb-1.5">직접 추가한 기구</div>
+            <div className="flex flex-wrap gap-1.5">
+              {customEquipment.map((eq) => (
+                <button
+                  key={eq}
+                  onClick={() => toggleEquipment(eq)}
+                  className={`flex items-center gap-1 pl-3 pr-2 py-1.5 rounded-full text-xs ${
+                    equipment.includes(eq) ? "bg-teal-500 text-zinc-950" : "bg-zinc-900 text-zinc-400"
+                  }`}
+                >
+                  {eq}
+                  <span
+                    onClick={(e) => { e.stopPropagation(); removeCustomEquipment(eq); }}
+                    className="opacity-70 hover:opacity-100"
+                  >
+                    <X className="w-3 h-3" />
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="flex items-center gap-2 mt-3">
+          <input
+            value={newEquipment}
+            onChange={(e) => setNewEquipment(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addCustomEquipment(); } }}
+            placeholder="목록에 없는 기구 이름 입력 (예: 로우풀리)"
+            className="flex-1 bg-zinc-900 rounded-md px-3 py-2 text-xs text-zinc-100 placeholder-zinc-600 outline-none focus:ring-1 focus:ring-teal-500"
+          />
+          <button
+            onClick={addCustomEquipment}
+            className="shrink-0 bg-zinc-800 text-teal-400 rounded-md px-3 py-2 text-xs font-medium flex items-center gap-1"
+          >
+            <Plus className="w-3.5 h-3.5" /> 추가
+          </button>
+        </div>
+
         <p className="text-[11px] text-zinc-600 mt-3">등록한 기구가 없는 운동은 추천 탭에서 맨몸/밴드 대체 동작으로 바뀌어요.</p>
       </div>
 
+      <div className="mb-6">
+        <label className="text-xs text-zinc-500 mb-2 block">직접 만든 운동 (추천 탭에도 나와요)</label>
+
+        {customExercises.length > 0 && (
+          <div className="space-y-2 mb-3">
+            {customExercises.map((ce) => (
+              <div key={ce.id} className="flex items-center justify-between bg-zinc-900 rounded-lg px-3 py-2">
+                <div className="min-w-0">
+                  <div className="text-sm text-zinc-100 truncate">{ce.name}</div>
+                  <div className="text-[11px] text-zinc-500">
+                    {ce.bodyPart} · {ce.sets}세트 × {ce.reps}
+                    {ce.equipment && ce.equipment.length > 0 ? ` · ${ce.equipment.join(", ")}` : ""}
+                  </div>
+                </div>
+                <button onClick={() => removeCustomExercise(ce.id)} className="text-zinc-600 hover:text-red-400 p-1 shrink-0">
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="bg-zinc-900 rounded-lg p-3 space-y-2.5">
+          <div className="flex flex-wrap gap-1.5">
+            {BODY_PARTS.map((bp) => (
+              <button
+                key={bp}
+                onClick={() => { setNewExBodyPart(bp); setNewExEquipment([]); }}
+                className={`px-3 py-1 rounded-full text-xs ${newExBodyPart === bp ? "bg-orange-500 text-zinc-950" : "bg-zinc-800 text-zinc-400"}`}
+              >
+                {bp}
+              </button>
+            ))}
+          </div>
+
+          <input
+            value={newExName}
+            onChange={(e) => setNewExName(e.target.value)}
+            placeholder="운동 이름 (예: 케이블 로우)"
+            className="w-full bg-zinc-800 rounded-md px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 outline-none focus:ring-1 focus:ring-orange-500"
+          />
+
+          <div className="grid grid-cols-2 gap-2">
+            <input
+              value={newExSets}
+              onChange={(e) => setNewExSets(e.target.value)}
+              placeholder="세트"
+              className="bg-zinc-800 rounded-md px-2 py-2 text-sm text-center text-zinc-100 outline-none focus:ring-1 focus:ring-orange-500"
+            />
+            <input
+              value={newExReps}
+              onChange={(e) => setNewExReps(e.target.value)}
+              placeholder="횟수"
+              className="bg-zinc-800 rounded-md px-2 py-2 text-sm text-center text-zinc-100 outline-none focus:ring-1 focus:ring-orange-500"
+            />
+          </div>
+
+          <div>
+            <div className="text-[11px] text-zinc-500 mb-1.5">필요 장비 (선택, 없으면 맨몸 운동)</div>
+            <div className="flex flex-wrap gap-1.5">
+              {equipmentOptionsFor(newExBodyPart, customEquipment).map((eq) => (
+                <button
+                  key={eq}
+                  onClick={() => toggleNewExEquipment(eq)}
+                  className={`px-2.5 py-1 rounded-full text-[11px] ${
+                    newExEquipment.includes(eq) ? "bg-teal-500 text-zinc-950" : "bg-zinc-800 text-zinc-400"
+                  }`}
+                >
+                  {eq}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <button
+            onClick={addCustomExercise}
+            className="w-full bg-zinc-800 text-orange-400 rounded-md py-2 text-xs font-medium flex items-center justify-center gap-1.5"
+          >
+            <Plus className="w-3.5 h-3.5" /> 운동 추가
+          </button>
+        </div>
+        <p className="text-[11px] text-zinc-600 mt-2">여기서 추가한 운동은 해당 부위가 추천될 때 추천 탭 목록에 같이 나와요. 필요 장비를 골랐는데 보유 기구에 없으면, 대체 동작 없이 "장비 없음" 주의만 표시돼요.</p>
+      </div>
+
       <button
-        onClick={() => { onSave({ weight, height, difficultParts, equipment }); setNote("저장됐어요"); setTimeout(() => setNote(""), 1500); }}
+        onClick={() => { onSave({ weight, height, difficultParts, equipment, customEquipment, customExercises }); setNote("저장됐어요"); setTimeout(() => setNote(""), 1500); }}
         className="w-full bg-orange-500 text-zinc-950 rounded-md py-2.5 text-sm font-semibold flex items-center justify-center gap-1.5"
       >
         <Check className="w-4 h-4" /> 저장
