@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import { storage } from "./storage";
 import CheckupTab from "./checkup/CheckupTab";
+import BodyMap from "./BodyMap";
 import {
   Calendar as CalendarIcon,
   Dumbbell,
@@ -767,6 +768,30 @@ function RecommendTab({ logs, settings, adjustments, onAdd, onFeedback, onLevelC
   const difficultParts = settings.difficultParts || [];
   const equipment = settings.equipment || [];
   const [pending, setPending] = useState({});
+  // A body part tapped on the muscle map; overrides today's pick until cleared.
+  const [selectedPart, setSelectedPart] = useState(null);
+
+  // Days since each part was trained, counting today as 0 (lastTrainedMap starts at yesterday).
+  const daysSince = useMemo(() => {
+    const map = lastTrainedMap(logs, new Date(todayStr + "T00:00:00"), 30);
+    (logs[todayStr] || []).forEach((e) => { if (e.bodyPart in map) map[e.bodyPart] = 0; });
+    return map;
+  }, [logs, todayStr]);
+  const recovering = BODY_PARTS.filter((bp) => daysSince[bp] < MUSCLE_RECOVERY_DAYS);
+  const selectPart = (part) => {
+    setSelectedPart((cur) => (cur === part ? null : part));
+    setPending({});
+  };
+  const bodyMap = (
+    <div className="mb-4">
+      <BodyMap
+        selected={selectedPart}
+        recommended={rec.rest ? null : rec.bodyPart}
+        recovering={recovering}
+        onSelect={selectPart}
+      />
+    </div>
+  );
 
   const levelToggle = (
     <div className="flex gap-1.5 mb-5">
@@ -795,12 +820,13 @@ function RecommendTab({ logs, settings, adjustments, onAdd, onFeedback, onLevelC
       </div>
     );
 
-  if (rec.rest) {
+  if (rec.rest && !selectedPart) {
     return (
       <div className="px-5 pt-6">
         <div style={{ fontFamily: "Oswald, sans-serif" }} className="text-lg font-medium mb-1">오늘의 추천</div>
         {levelToggle}
         {restNote}
+        {bodyMap}
         <div className="bg-zinc-900 rounded-xl p-5">
           <div className="text-orange-500 font-semibold mb-2">
             {rec.reason === "weekly"
@@ -825,7 +851,8 @@ function RecommendTab({ logs, settings, adjustments, onAdd, onFeedback, onLevelC
     );
   }
 
-  const bodyPart = rec.bodyPart;
+  const bodyPart = selectedPart || rec.bodyPart;
+  const picked = selectedPart && selectedPart !== rec.bodyPart;
   const customForBodyPart = (settings.customExercises || [])
     .filter((ce) => ce.bodyPart === bodyPart)
     .map((ce) => ({
@@ -858,8 +885,13 @@ function RecommendTab({ logs, settings, adjustments, onAdd, onFeedback, onLevelC
       <div style={{ fontFamily: "Oswald, sans-serif" }} className="text-lg font-medium mb-1">오늘의 추천</div>
       {levelToggle}
       {restNote}
-      <div className="text-xs text-zinc-500 mb-5">
-        {rec.lastTrained[bodyPart] === Infinity ? "아직 기록이 없는 부위예요" : `${rec.lastTrained[bodyPart]}일 전에 마지막으로 훈련했어요`}
+      {bodyMap}
+      <div className="text-xs text-zinc-500 mb-3">
+        {daysSince[bodyPart] === Infinity
+          ? "아직 기록이 없는 부위예요"
+          : daysSince[bodyPart] === 0
+          ? "오늘 이미 훈련한 부위예요"
+          : `${daysSince[bodyPart]}일 전에 마지막으로 훈련했어요`}
       </div>
 
       <div className="bg-zinc-900 rounded-xl p-5 mb-4">
@@ -867,7 +899,26 @@ function RecommendTab({ logs, settings, adjustments, onAdd, onFeedback, onLevelC
           <div className="text-orange-500 font-semibold text-base">{bodyPart} 운동</div>
           <span className="text-xs text-zinc-500">{items.length}개 운동</span>
         </div>
-        <p className="text-xs text-zinc-500">가장 오래 쉰 부위를 우선으로 골랐어요.</p>
+        <p className="text-xs text-zinc-500">
+          {picked ? "근육 그림에서 직접 고른 부위예요." : "가장 오래 쉰 부위를 우선으로 골랐어요."}
+        </p>
+        {selectedPart && recovering.includes(selectedPart) && (
+          <div className="flex items-center gap-1 mt-2 text-[11px] text-amber-400">
+            <AlertTriangle className="w-3 h-3" />
+            최근 훈련한 부위라 아직 회복 중일 수 있어요. 가볍게 하거나 다른 부위를 골라 보세요.
+          </div>
+        )}
+        {selectedPart && rec.rest && (
+          <div className="flex items-center gap-1 mt-2 text-[11px] text-amber-400">
+            <AlertTriangle className="w-3 h-3" />
+            오늘은 쉬는 날로 추천됐어요. 운동한다면 가볍게 해 주세요.
+          </div>
+        )}
+        {selectedPart && (
+          <button onClick={() => selectPart(selectedPart)} className="mt-3 text-[11px] text-teal-400">
+            {rec.rest ? "← 휴식 안내로 돌아가기" : `← 오늘의 추천(${rec.bodyPart})으로 돌아가기`}
+          </button>
+        )}
       </div>
 
       <div className="space-y-2.5">
