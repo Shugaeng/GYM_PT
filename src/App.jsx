@@ -347,10 +347,14 @@ export default function PTApp() {
 
       <header className="px-5 pt-6 pb-4 border-b border-zinc-900 flex items-center justify-between">
         <div>
-          <div style={{ fontFamily: "Oswald, sans-serif" }} className="text-xl font-semibold tracking-tight text-zinc-50">
-            MY PT
+          <div className="flex items-baseline gap-2">
+            <div style={{ fontFamily: "Oswald, sans-serif" }} className="text-xl font-semibold tracking-tight text-zinc-50">
+              MY PT
+            </div>
+            <span className="text-[10px] text-zinc-600" title={__BUILD_INFO__}>v{__APP_VERSION__}</span>
           </div>
           <div className="text-xs text-zinc-500 mt-0.5">개인 트레이너 노트</div>
+          <div className="text-[10px] text-zinc-700 mt-0.5">빌드 {__BUILD_INFO__}</div>
         </div>
         <Flame className="w-5 h-5 text-orange-500" />
       </header>
