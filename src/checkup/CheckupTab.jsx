@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import { storage } from "../storage";
 import { ITEMS, ITEM_BY_KEY, CATEGORIES } from "./catalog";
-import { STATUS_LABEL, statusOf, seriesOf, trendOf, findConcerns, rangeText, sortedExams, historyForPrompt } from "./analyze";
+import { STATUS_LABEL, statusOf, seriesOf, trendOf, findConcerns, rangeText, sortedExams, historyForPrompt, allFindings } from "./analyze";
 import { extractCheckup, summarizeHistory } from "./ai";
 
 const HEADING = { fontFamily: "Oswald, sans-serif" };
@@ -48,20 +48,29 @@ function fmt(v) {
 }
 
 // Editable rows shared by the extraction result and manual entry screens.
-function draftFromExtraction(result) {
-  return {
-    id: null,
-    date: /^\d{4}-\d{2}-\d{2}$/.test(result.exam_date) ? result.exam_date : "",
-    hospital: result.hospital || "",
-    rows: result.items.map((r) => ({
-      rid: uid(),
-      key: ITEM_BY_KEY[r.key] ? r.key : "other",
-      name: r.name,
-      value: r.value,
-      unit: r.unit,
-      ref: r.ref_range,
-    })),
-  };
+// One draft per test date found in the uploaded files.
+function draftsFromExtraction(result) {
+  return result.exams
+    .filter((e) => e.items.length || e.findings.length)
+    .map((e) => ({
+      id: null,
+      date: /^\d{4}-\d{2}-\d{2}$/.test(e.exam_date) ? e.exam_date : "",
+      hospital: e.hospital || "",
+      rows: e.items.map((r) => ({
+        rid: uid(),
+        key: ITEM_BY_KEY[r.key] ? r.key : "other",
+        name: r.name,
+        value: r.value,
+        unit: r.unit,
+        ref: r.ref_range,
+      })),
+      findings: e.findings.map((f) => ({ rid: uid(), area: f.area, text: f.text })),
+    }))
+    .sort((a, b) => b.date.localeCompare(a.date));
+}
+
+function emptyDraft() {
+  return { id: null, date: todayStr(), hospital: "", rows: [], findings: [] };
 }
 
 function draftFromExam(exam) {
@@ -75,6 +84,7 @@ function draftFromExam(exam) {
       })),
       ...(exam.others || []).map((o) => ({ rid: uid(), key: "other", name: o.name, value: o.value, unit: o.unit, ref: o.ref })),
     ],
+    findings: (exam.findings || []).map((f) => ({ rid: uid(), area: f.area, text: f.text })),
   };
 }
 
@@ -90,7 +100,10 @@ function examFromDraft(draft) {
       others.push({ name: row.name.trim(), value: String(row.value).trim(), unit: row.unit || "", ref: row.ref || "" });
     }
   }
-  return { id: draft.id || uid(), date: draft.date, hospital: draft.hospital.trim(), values, others };
+  const findings = draft.findings
+    .filter((f) => f.text.trim())
+    .map((f) => ({ area: f.area.trim(), text: f.text.trim() }));
+  return { id: draft.id || uid(), date: draft.date, hospital: draft.hospital.trim(), values, others, findings };
 }
 
 export default function CheckupTab() {
@@ -126,21 +139,27 @@ export default function CheckupTab() {
     storage.set("pt-checkup-report", JSON.stringify(next)).catch(() => {});
   };
 
-  const saveExam = (exam) => {
-    // A second upload for the same checkup date (e.g. a separate page with the
-    // blood results) is merged into the existing record instead of duplicating it.
-    const sameDate = exams.find((e) => e.id !== exam.id && e.date === exam.date);
-    let next;
-    if (sameDate) {
-      const merged = {
-        ...sameDate,
-        hospital: sameDate.hospital || exam.hospital,
-        values: { ...sameDate.values, ...exam.values },
-        others: [...(sameDate.others || []).filter((o) => !exam.others.some((n) => n.name === o.name)), ...exam.others],
-      };
-      next = exams.filter((e) => e.id !== exam.id).map((e) => (e.id === sameDate.id ? merged : e));
-    } else {
-      next = exams.some((e) => e.id === exam.id) ? exams.map((e) => (e.id === exam.id ? exam : e)) : [...exams, exam];
+  const saveExams = (list) => {
+    let next = exams;
+    for (const exam of list) {
+      // A second upload for the same date (e.g. a separate page with the blood
+      // results) is merged into the existing record instead of duplicating it.
+      const sameDate = next.find((e) => e.id !== exam.id && e.date === exam.date);
+      if (sameDate) {
+        const merged = {
+          ...sameDate,
+          hospital: sameDate.hospital || exam.hospital,
+          values: { ...sameDate.values, ...exam.values },
+          others: [...(sameDate.others || []).filter((o) => !exam.others.some((n) => n.name === o.name)), ...exam.others],
+          findings: [
+            ...(sameDate.findings || []).filter((f) => !exam.findings.some((n) => n.area === f.area && n.text === f.text)),
+            ...exam.findings,
+          ],
+        };
+        next = next.filter((e) => e.id !== exam.id).map((e) => (e.id === sameDate.id ? merged : e));
+      } else {
+        next = next.some((e) => e.id === exam.id) ? next.map((e) => (e.id === exam.id ? exam : e)) : [...next, exam];
+      }
     }
     persistExams(next);
     setView({ name: "home" });
@@ -156,11 +175,11 @@ export default function CheckupTab() {
   if (view.name === "review") {
     return (
       <ReviewScreen
-        initial={view.draft}
+        initial={view.drafts}
         sex={prefs.sex}
         onCancel={() => setView({ name: "home" })}
-        onSave={saveExam}
-        onDelete={view.draft.id ? () => deleteExam(view.draft.id) : null}
+        onSave={saveExams}
+        onDelete={view.drafts[0].id ? () => deleteExam(view.drafts[0].id) : null}
       />
     );
   }
@@ -190,7 +209,7 @@ export default function CheckupTab() {
       prefs={prefs}
       report={report}
       onReport={persistReport}
-      onReview={(draft) => setView({ name: "review", draft })}
+      onReview={(drafts) => setView({ name: "review", drafts })}
       onItem={(key) => setView({ name: "item", key })}
       onPrefs={() => setView({ name: "prefs" })}
     />
@@ -209,6 +228,8 @@ function HomeScreen({ exams, prefs, report, onReport, onReview, onItem, onPrefs 
   const [showAllConcerns, setShowAllConcerns] = useState(false);
 
   const concerns = useMemo(() => findConcerns(exams, prefs.sex), [exams, prefs.sex]);
+  const findings = useMemo(() => allFindings(exams), [exams]);
+  const [showAllFindings, setShowAllFindings] = useState(false);
   const sorted = useMemo(() => sortedExams(exams).reverse(), [exams]);
 
   const onFiles = async (e) => {
@@ -219,8 +240,9 @@ function HomeScreen({ exams, prefs, report, onReport, onReview, onItem, onPrefs 
     setError("");
     setBusy(true);
     try {
-      const result = await extractCheckup(prefs.apiKey, files);
-      onReview(draftFromExtraction(result));
+      const drafts = draftsFromExtraction(await extractCheckup(prefs.apiKey, files));
+      if (!drafts.length) throw new Error("결과지에서 검사 결과를 찾지 못했어요. 더 선명한 사진이나 PDF로 다시 시도해 주세요.");
+      onReview(drafts);
     } catch (err) {
       setError(err.message || String(err));
     } finally {
@@ -272,14 +294,16 @@ function HomeScreen({ exams, prefs, report, onReport, onReview, onItem, onPrefs 
           {busy ? "결과지 읽는 중... (1분 정도)" : "결과지 올리기 (PDF·사진)"}
         </button>
         <button
-          onClick={() => onReview({ id: null, date: todayStr(), hospital: "", rows: [] })}
+          onClick={() => onReview([emptyDraft()])}
           disabled={busy}
           className="flex items-center gap-1.5 bg-zinc-900 text-zinc-300 text-sm rounded-md px-3"
         >
           <Pencil className="w-3.5 h-3.5" /> 직접 입력
         </button>
       </div>
-      <p className="text-[11px] text-zinc-600 mb-4">한 번의 검진은 여러 파일(사진 여러 장)을 함께 선택해도 돼요.</p>
+      <p className="text-[11px] text-zinc-600 mb-4">
+        여러 파일·사진을 함께 선택해도 돼요. 결과지에 지난 연도 값이 같이 있거나 검사일이 다르면 날짜별로 나눠서 읽어요.
+      </p>
       {error && (
         <div className="flex items-start gap-2 text-xs text-rose-300 bg-rose-500/10 rounded-md px-3 py-2 mb-4">
           <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" /> {error}
@@ -325,6 +349,24 @@ function HomeScreen({ exams, prefs, report, onReport, onReview, onItem, onPrefs 
             )}
           </Section>
 
+          {findings.length > 0 && (
+            <Section title="검사 소견">
+              <div className="bg-zinc-900 rounded-lg">
+                {(showAllFindings ? findings : findings.slice(0, 4)).map((f, i) => (
+                  <div key={i} className="px-4 py-2.5 border-b border-zinc-800/60 last:border-0">
+                    <div className="text-[11px] text-zinc-500">{f.date} · {f.area}</div>
+                    <div className="text-xs text-zinc-200 mt-0.5 leading-relaxed">{f.text}</div>
+                  </div>
+                ))}
+              </div>
+              {findings.length > 4 && (
+                <button onClick={() => setShowAllFindings((v) => !v)} className="w-full text-xs text-zinc-500 py-2">
+                  {showAllFindings ? "접기" : `${findings.length - 4}개 더 보기`}
+                </button>
+              )}
+            </Section>
+          )}
+
           <Section title="AI 리포트">
             <div className="bg-zinc-900 rounded-lg px-4 py-3">
               {report ? (
@@ -359,7 +401,7 @@ function HomeScreen({ exams, prefs, report, onReport, onReview, onItem, onPrefs 
               {sorted.map((e) => (
                 <button
                   key={e.id}
-                  onClick={() => onReview(draftFromExam(e))}
+                  onClick={() => onReview([draftFromExam(e)])}
                   className="w-full flex items-center justify-between bg-zinc-900 rounded-lg px-4 py-3 text-left"
                 >
                   <div>
@@ -368,6 +410,7 @@ function HomeScreen({ exams, prefs, report, onReport, onReview, onItem, onPrefs 
                   </div>
                   <div className="text-[11px] text-zinc-500">
                     {Object.keys(e.values).length + (e.others || []).length}개 항목
+                    {(e.findings || []).length > 0 && ` · 소견 ${e.findings.length}`}
                   </div>
                 </button>
               ))}
@@ -548,9 +591,21 @@ function BackButton({ onClick }) {
 // ---------------------------------------------------------------------------
 
 function ReviewScreen({ initial, sex, onCancel, onSave, onDelete }) {
-  const [draft, setDraft] = useState(initial);
+  const [drafts, setDrafts] = useState(initial);
+  const [active, setActive] = useState(0);
   const [addKey, setAddKey] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const draft = drafts[active];
+  const setDraft = (fn) => setDrafts((all) => all.map((d, i) => (i === active ? fn(d) : d)));
+  const removeDraft = () => {
+    setDrafts((all) => all.filter((_, i) => i !== active));
+    setActive(0);
+  };
+  const setFinding = (rid, patch) =>
+    setDraft((d) => ({ ...d, findings: d.findings.map((f) => (f.rid === rid ? { ...f, ...patch } : f)) }));
+  const removeFinding = (rid) => setDraft((d) => ({ ...d, findings: d.findings.filter((f) => f.rid !== rid) }));
+  const addFinding = () => setDraft((d) => ({ ...d, findings: [...d.findings, { rid: uid(), area: "", text: "" }] }));
 
   const setField = (field, value) => setDraft((d) => ({ ...d, [field]: value }));
   const setRow = (rid, patch) => setDraft((d) => ({ ...d, rows: d.rows.map((r) => (r.rid === rid ? { ...r, ...patch } : r)) }));
@@ -570,15 +625,36 @@ function ReviewScreen({ initial, sex, onCancel, onSave, onDelete }) {
     .sort((a, b) => ITEMS.indexOf(ITEM_BY_KEY[a.key]) - ITEMS.indexOf(ITEM_BY_KEY[b.key]));
   const otherRows = draft.rows.filter((r) => !ITEM_BY_KEY[r.key]);
   const usedKeys = new Set(standardRows.map((r) => r.key));
-  const isNew = !initial.id;
-  const valid = /^\d{4}-\d{2}-\d{2}$/.test(draft.date);
+  const isNew = !initial[0].id;
+  const validDate = (d) => /^\d{4}-\d{2}-\d{2}$/.test(d.date);
+  const valid = validDate(draft);
+  const allValid = drafts.every(validDate);
 
   return (
     <div className="px-5 pt-6">
       <BackButton onClick={onCancel} />
       <div style={HEADING} className="text-lg font-medium mb-1">{isNew ? "검진 결과 확인" : "검진 기록 수정"}</div>
-      {isNew && draft.rows.length > 0 && (
+      {isNew && (draft.rows.length > 0 || draft.findings.length > 0) && (
         <p className="text-xs text-zinc-500 mb-4">자동으로 읽은 값이에요. 결과지와 다른 곳이 있으면 고친 뒤 저장해 주세요.</p>
+      )}
+
+      {drafts.length > 1 && (
+        <div className="mb-4">
+          <div className="text-[11px] text-zinc-500 mb-1.5">검사일 {drafts.length}개를 찾았어요. 날짜를 눌러 각각 확인하세요.</div>
+          <div className="flex flex-wrap gap-1.5">
+            {drafts.map((d, i) => (
+              <button
+                key={i}
+                onClick={() => setActive(i)}
+                className={`px-3 py-1.5 rounded-full text-xs ${
+                  i === active ? "bg-orange-500 text-zinc-950" : validDate(d) ? "bg-zinc-900 text-zinc-400" : "bg-amber-500/15 text-amber-300"
+                }`}
+              >
+                {d.date || "날짜 없음"}
+              </button>
+            ))}
+          </div>
+        </div>
       )}
 
       <div className="grid grid-cols-2 gap-2 mb-5 mt-3">
@@ -657,13 +733,47 @@ function ReviewScreen({ initial, sex, onCancel, onSave, onDelete }) {
         <p className="text-[11px] text-zinc-600 mt-2">기타 항목은 기록과 AI 리포트에만 쓰이고, 추세 판정에는 들어가지 않아요.</p>
       </Section>
 
+      <Section title={`검사 소견 (${draft.findings.length})`}>
+        <div className="bg-zinc-900 rounded-lg">
+          {draft.findings.map((f) => (
+            <div key={f.rid} className="px-3 py-2 border-b border-zinc-800/60 last:border-0">
+              <div className="flex items-center gap-2">
+                <input
+                  value={f.area}
+                  onChange={(e) => setFinding(f.rid, { area: e.target.value })}
+                  placeholder="검사 (예: 상복부초음파)"
+                  className="flex-1 min-w-0 bg-transparent text-[11px] text-zinc-500 outline-none"
+                />
+                <button onClick={() => removeFinding(f.rid)} className="text-zinc-600" aria-label="삭제"><X className="w-3.5 h-3.5" /></button>
+              </div>
+              <textarea
+                value={f.text}
+                onChange={(e) => setFinding(f.rid, { text: e.target.value })}
+                rows={Math.max(2, Math.ceil(f.text.length / 26))}
+                placeholder="소견 내용"
+                className="w-full mt-1 bg-zinc-950 rounded px-2 py-1.5 text-xs text-zinc-100 outline-none focus:ring-1 focus:ring-orange-500 resize-none"
+              />
+            </div>
+          ))}
+          <button onClick={addFinding} className="w-full flex items-center gap-1.5 px-3 py-2.5 text-xs text-zinc-500">
+            <Plus className="w-3.5 h-3.5" /> 소견 추가
+          </button>
+        </div>
+        <p className="text-[11px] text-zinc-600 mt-2">초음파·CT·내시경 같은 검사의 소견이에요. AI 리포트에 함께 반영돼요.</p>
+      </Section>
+
       <button
-        onClick={() => onSave(examFromDraft(draft))}
-        disabled={!valid}
+        onClick={() => onSave(drafts.map(examFromDraft))}
+        disabled={!allValid}
         className="w-full bg-orange-500 text-zinc-950 font-semibold text-sm rounded-md py-3 disabled:opacity-40 mb-3"
       >
-        저장
+        {drafts.length > 1 ? `${drafts.length}개 검사일 모두 저장` : "저장"}
       </button>
+      {drafts.length > 1 && (
+        <button onClick={removeDraft} className="w-full text-xs text-zinc-500 py-2 mb-2">
+          이 날짜({draft.date || "날짜 없음"})는 저장하지 않기
+        </button>
+      )}
       {onDelete && (
         <button
           onClick={() => (confirmDelete ? onDelete() : setConfirmDelete(true))}

@@ -14,7 +14,7 @@ function inBand([lo, hi], v) {
 }
 
 export function rangeText(item, sex) {
-  if (item.rangeLabel) return band(item.rangeLabel, sex);
+  if (item.rangeLabel) return typeof item.rangeLabel === "string" ? item.rangeLabel : band(item.rangeLabel, sex);
   const n = band(item.normal, sex);
   if (!n) return "";
   const [lo, hi] = n;
@@ -87,6 +87,83 @@ function fmt(v) {
   return typeof v === "number" ? String(Math.round(v * 100) / 100) : String(v);
 }
 
+// Tests are not all repeated every time (a coronary CT, a hospital blood test
+// between annual checkups), so an item's latest value still counts if it was
+// measured within this window of the most recent record. Older values are
+// history, not the current state.
+const RECENT_DAYS = 548;
+
+function isRecent(date, latestDate) {
+  return (new Date(latestDate) - new Date(date)) / 86400000 <= RECENT_DAYS;
+}
+
+function currentValues(exams) {
+  const sorted = sortedExams(exams);
+  const latestDate = sorted.at(-1).date;
+  const values = {};
+  for (const e of sorted) {
+    if (!isRecent(e.date, latestDate)) continue;
+    Object.assign(values, e.values);
+  }
+  return values;
+}
+
+// "a~b", "a-b", "0-" (lower bound only) as printed on the report.
+export function parseRefRange(ref) {
+  const m = String(ref || "").replace(/,/g, "").match(/^\s*(-?\d+(?:\.\d+)?)\s*[~\-–]\s*(-?\d+(?:\.\d+)?)?\s*$/);
+  if (!m) return null;
+  const lo = parseFloat(m[1]);
+  const hi = m[2] !== undefined ? parseFloat(m[2]) : null;
+  // Placeholder ranges like "0~0" carry no information.
+  if (hi !== null && hi <= lo) return null;
+  return [lo, hi];
+}
+
+// Non-catalog tests are judged against the reference range printed on the
+// report itself, so things like a CPK spike are not silently ignored.
+function otherConcerns(exams, latestDate) {
+  const byName = new Map();
+  for (const e of sortedExams(exams)) {
+    for (const o of e.others || []) {
+      if (!byName.has(o.name)) byName.set(o.name, []);
+      byName.get(o.name).push({ date: e.date, ...o });
+    }
+  }
+  const out = [];
+  for (const [name, points] of byName) {
+    const last = points.at(-1);
+    if (!isRecent(last.date, latestDate)) continue;
+    const range = parseRefRange(last.ref);
+    const v = parseFloat(String(last.value).replace(/,/g, ""));
+    if (!range || Number.isNaN(v)) continue;
+    const [lo, hi] = range;
+    const high = hi !== null && v > hi;
+    const low = v < lo;
+    if (!high && !low) continue;
+    const far = high ? v > hi * 2 : v < lo / 2;
+    out.push({
+      key: `other:${name}`,
+      score: far ? 2.5 : 1.2,
+      status: far ? "abnormal" : "caution",
+      title: `${name} ${last.value}${last.unit ? ` ${last.unit}` : ""}`,
+      detail: `결과지 참고치(${last.ref})보다 ${high ? "높아요" : "낮아요"}`,
+      history: points.length > 1 ? points.slice(-4).map((p) => p.value).join(" → ") : null,
+    });
+  }
+  return out;
+}
+
+function hasCoronaryCalcium(exams) {
+  return seriesOf(exams, "cac").some((p) => typeof p.value === "number" && p.value > 0);
+}
+
+// Imaging/endoscopy/doctor's findings, newest first.
+export function allFindings(exams) {
+  return sortedExams(exams)
+    .reverse()
+    .flatMap((e) => (e.findings || []).map((f) => ({ date: e.date, ...f })));
+}
+
 // Items worth paying attention to, most important first.
 export function findConcerns(exams, sex) {
   if (!exams.length) return [];
@@ -97,9 +174,7 @@ export function findConcerns(exams, sex) {
     const series = seriesOf(exams, item.key);
     if (!series.length) continue;
     const current = series.at(-1);
-    // Only judge values from the latest checkup; an item that was not measured
-    // this time should not be flagged off a stale number.
-    if (current.date !== latest.date) continue;
+    if (!isRecent(current.date, latest.date)) continue;
     const status = statusOf(item, current.value, sex);
     if (!status) continue;
     const trend = trendOf(item, series, sex);
@@ -108,8 +183,13 @@ export function findConcerns(exams, sex) {
 
     let score = 0;
     const reasons = [];
-    if (status === "abnormal") { score += 3; reasons.push(`${STATUS_LABEL.abnormal} 범위입니다 (정상 ${rangeText(item, sex)})`); }
-    if (status === "caution") { score += 2; reasons.push(`${STATUS_LABEL.caution} 범위입니다 (정상 ${rangeText(item, sex)})`); }
+    const normalText = rangeText(item, sex) ? ` (정상 ${rangeText(item, sex)})` : "";
+    if (status === "abnormal") { score += 3; reasons.push(`${STATUS_LABEL.abnormal} 범위입니다${normalText}`); }
+    if (status === "caution") { score += 2; reasons.push(item.qualitative ? "양성으로 나왔어요" : `${STATUS_LABEL.caution} 범위입니다${normalText}`); }
+    if (status !== "normal") score += item.weight || 0;
+    let outStreak = 0;
+    for (let i = series.length - 1; i >= 0 && statusOf(item, series[i].value, sex) !== "normal"; i--) outStreak++;
+    if (outStreak >= 2 && trend?.direction !== "better") { score += 1; reasons.push(`${outStreak}회 연속 범위 밖`); }
     const near = status === "normal" && nearLimit(item, current.value, sex);
     if (trend && trend.worseStreak >= 2) { score += 1.5; reasons.push(`최근 ${trend.worseStreak}회 연속 나빠지고 있어요`); }
     else if (trend && trend.direction === "worse") { score += 0.5; reasons.push("지난 검진보다 나빠졌어요"); }
@@ -117,9 +197,16 @@ export function findConcerns(exams, sex) {
       score += 1;
       reasons.push("아직 정상이지만 경계에 가까워지고 있어요");
     }
+    // Coronary calcification usually means a stricter LDL goal than the general
+    // screening cut-off, so an LDL that is "only" borderline matters more here.
+    const ldlWithCalcium = item.key === "ldl" && typeof current.value === "number" && current.value >= 100 && hasCoronaryCalcium(exams);
+    if (ldlWithCalcium) {
+      score += 1.5;
+      reasons.push("관상동맥 석회화가 있으면 LDL 목표를 보통 더 낮게(100 미만 등) 잡아요. 목표치는 의사와 상의하세요");
+    }
     // Within the normal range, only a sustained slide is worth flagging: either
     // three worse checkups in a row, or two in a row that reach the boundary.
-    if (status === "normal" && !(trend && (trend.worseStreak >= 3 || (trend.worseStreak >= 2 && near)))) continue;
+    if (status === "normal" && !ldlWithCalcium && !(trend && (trend.worseStreak >= 3 || (trend.worseStreak >= 2 && near)))) continue;
 
     out.push({
       key: item.key,
@@ -132,7 +219,9 @@ export function findConcerns(exams, sex) {
     });
   }
 
-  const ms = metabolicSyndrome(latest, sex);
+  out.push(...otherConcerns(exams, latest.date));
+
+  const ms = metabolicSyndrome({ values: currentValues(exams) }, sex);
   if (ms && ms.count >= 3) {
     out.push({
       key: "metabolic",
@@ -182,7 +271,8 @@ export function historyForPrompt(exams, sex) {
       })
       .filter(Boolean);
     const others = (e.others || []).map((o) => `${o.name}=${o.value}${o.unit || ""}${o.ref ? ` (참고치 ${o.ref})` : ""}`);
-    return `[${e.date}${e.hospital ? ` ${e.hospital}` : ""}] ${[...vals, ...others].join(", ")}`;
+    const findings = (e.findings || []).map((f) => `\n  소견 - ${f.area}: ${f.text}`).join("");
+    return `[${e.date}${e.hospital ? ` ${e.hospital}` : ""}] ${[...vals, ...others].join(", ")}${findings}`;
   });
   return `성별: ${sex === "F" ? "여성" : sex === "M" ? "남성" : "미입력"}\n${rows.join("\n")}`;
 }
