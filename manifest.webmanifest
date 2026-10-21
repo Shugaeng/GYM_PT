@@ -1,0 +1,11 @@
+{
+  "name": "MY PT",
+  "short_name": "MY PT",
+  "description": "운동 기록과 건강검진 추세를 관리하는 개인 앱",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#09090b",
+  "theme_color": "#09090b",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
