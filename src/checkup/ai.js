@@ -143,19 +143,46 @@ export async function extractCheckup(apiKey, files) {
   }
 }
 
+const REPORT_SCHEMA = {
+  type: "object",
+  properties: {
+    summary: { type: "string", description: "전체 요약 2~3문장" },
+    concerns: {
+      type: "array",
+      description: "신경 써야 할 항목, 중요한 순서대로",
+      items: {
+        type: "object",
+        properties: {
+          level: { type: "string", enum: ["high", "medium"], description: "high: 진료·추적이 필요한 것, medium: 생활 관리로 지켜볼 것" },
+          title: { type: "string", description: "짧은 제목 (예: LDL 콜레스테롤, 관상동맥 협착)" },
+          detail: { type: "string", description: "수치 흐름과 이유를 1~2문장으로" },
+        },
+        required: ["level", "title", "detail"],
+        additionalProperties: false,
+      },
+    },
+    improved: { type: "array", items: { type: "string" }, description: "좋아진 항목" },
+    actions: { type: "array", items: { type: "string" }, description: "생활에서 해볼 것" },
+    questions: { type: "array", items: { type: "string" }, description: "다음 진료·검진 때 물어볼 것" },
+  },
+  required: ["summary", "concerns", "improved", "actions", "questions"],
+  additionalProperties: false,
+};
+
 const SUMMARY_PROMPT = `아래는 한 사람의 연도별 건강검진 수치와 검사 소견입니다.
 
 {history}
 
 이 사람이 직접 읽을 건강 리포트를 한국어로 써 주세요.
-1. 전체 요약 (2~3문장)
-2. 신경 써야 할 항목: 수치가 범위를 벗어났거나 해마다 나빠지는 항목을 중요한 순서대로. 정상 범위 안이라도 꾸준히 나빠지는 흐름이 있으면 짚어 주세요.
-3. 좋아진 항목
-4. 생활에서 해볼 것: 위 항목과 직접 연결되는 구체적인 행동 몇 가지
-5. 다음 진료·검진 때 물어볼 것
+- summary: 전체 요약 (2~3문장)
+- concerns: 수치가 범위를 벗어났거나 해마다 나빠지는 항목, 영상·내시경 등 검사 소견 중 신경 써야 할 것을 중요한 순서대로. 정상 범위 안이라도 꾸준히 나빠지는 흐름이 있으면 짚고, 여러 결과가 같은 문제를 가리키면 하나로 묶어 설명해 주세요. 추적 검사나 진료 확인이 필요한 것은 level을 high로 두세요.
+- improved: 좋아진 항목
+- actions: 위 항목과 직접 연결되는 구체적인 생활 습관 몇 가지
+- questions: 다음 진료·검진 때 의사에게 물어볼 것
 
-진단을 내리지 말고, 걱정되는 부분은 의사와 상담하도록 안내해 주세요. 마크다운 기호(#, *, |) 없이 번호와 줄바꿈만 써 주세요.`;
+진단을 내리지 말고, 걱정되는 부분은 의사와 상담하도록 안내해 주세요. 마크다운 기호는 쓰지 마세요.`;
 
+// Returns { summary, concerns: [{ level, title, detail }], improved, actions, questions }.
 export async function summarizeHistory(apiKey, historyText) {
   try {
     const message = await client(apiKey)
@@ -164,12 +191,12 @@ export async function summarizeHistory(apiKey, historyText) {
         max_tokens: 16000,
         betas: ["server-side-fallback-2026-07-01"],
         fallbacks: "default",
-        output_config: { effort: "medium" },
+        output_config: { effort: "medium", format: { type: "json_schema", schema: REPORT_SCHEMA } },
         messages: [{ role: "user", content: SUMMARY_PROMPT.replace("{history}", historyText) }],
       })
       .finalMessage();
     guardRefusal(message);
-    return message.content.filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+    return JSON.parse(message.content.find((b) => b.type === "text")?.text);
   } catch (e) {
     throw friendlyError(e);
   }

@@ -31,6 +31,16 @@ const STATUS_STYLE = {
   abnormal: "bg-rose-500/15 text-rose-300",
 };
 const STATUS_COLOR = { normal: "#2dd4bf", caution: "#fbbf24", abnormal: "#fb7185" };
+// Out-of-range items should be impossible to skim past: abnormal reads red,
+// caution reads amber, and both get a colored edge on their card.
+const CONCERN_CARD = {
+  abnormal: "bg-rose-500/10 border-rose-500",
+  caution: "bg-amber-500/5 border-amber-400",
+  normal: "bg-zinc-900 border-zinc-700",
+};
+const CONCERN_TITLE = { abnormal: "text-rose-300", caution: "text-amber-200", normal: "text-zinc-100" };
+const CONCERN_DETAIL = { abnormal: "text-rose-200/90", caution: "text-amber-100/80", normal: "text-zinc-400" };
+const VALUE_COLOR = { abnormal: "text-rose-400 font-semibold", caution: "text-amber-300 font-semibold" };
 
 function uid() { return Math.random().toString(36).slice(2, 10); }
 function todayStr() { return new Date().toISOString().slice(0, 10); }
@@ -192,12 +202,18 @@ export default function CheckupTab() {
       <PrefsScreen
         prefs={prefs}
         exams={exams}
+        report={report}
         onSave={(p) => { persistPrefs(p); setView({ name: "home" }); }}
-        onImport={(list) => {
+        onImport={(list, importedReport) => {
           // Merge by id so importing an old backup never wipes newer records.
           const byId = new Map(exams.map((e) => [e.id, e]));
           for (const e of list) if (e && e.id && e.date && e.values) byId.set(e.id, e);
           persistExams([...byId.values()]);
+          // A report written elsewhere (e.g. in a Claude chat) can ride along
+          // in the same file; it is treated as covering the merged records.
+          if (importedReport && importedReport.data) {
+            persistReport({ createdAt: todayStr(), ...importedReport, examCount: byId.size });
+          }
         }}
         onBack={() => setView({ name: "home" })}
       />
@@ -256,8 +272,8 @@ function HomeScreen({ exams, prefs, report, onReport, onReview, onItem, onPrefs 
     setError("");
     setReportBusy(true);
     try {
-      const text = await summarizeHistory(prefs.apiKey, historyForPrompt(exams, prefs.sex));
-      onReport({ text, createdAt: todayStr(), examCount: exams.length });
+      const data = await summarizeHistory(prefs.apiKey, historyForPrompt(exams, prefs.sex));
+      onReport({ data, createdAt: todayStr(), examCount: exams.length });
     } catch (err) {
       setError(err.message || String(err));
     } finally {
@@ -319,7 +335,18 @@ function HomeScreen({ exams, prefs, report, onReport, onReview, onItem, onPrefs 
         </div>
       ) : (
         <>
-          <Section title="신경 쓸 항목">
+          <Section
+            title={
+              <span className="flex items-center gap-1.5">
+                신경 쓸 항목
+                {concerns.length > 0 && (
+                  <span className="flex items-center gap-1 text-rose-400 font-semibold">
+                    <AlertTriangle className="w-3.5 h-3.5" /> {concerns.length}
+                  </span>
+                )}
+              </span>
+            }
+          >
             {concerns.length === 0 ? (
               <div className="bg-zinc-900 rounded-lg px-4 py-4 text-xs text-zinc-400">
                 최근 검진에서 범위를 벗어나거나 나빠지는 항목이 없어요. 👍
@@ -330,13 +357,13 @@ function HomeScreen({ exams, prefs, report, onReport, onReview, onItem, onPrefs 
                   <button
                     key={c.key}
                     onClick={() => ITEM_BY_KEY[c.key] && onItem(c.key)}
-                    className="w-full text-left bg-zinc-900 rounded-lg px-4 py-3"
+                    className={`w-full text-left rounded-lg px-4 py-3 border-l-4 ${CONCERN_CARD[c.status]}`}
                   >
                     <div className="flex items-center gap-2">
                       <StatusChip status={c.status} />
-                      <span className="text-sm font-medium text-zinc-100">{c.title}</span>
+                      <span className={`text-sm font-semibold ${CONCERN_TITLE[c.status]}`}>{c.title}</span>
                     </div>
-                    <div className="text-xs text-zinc-400 mt-1.5">{c.detail}</div>
+                    <div className={`text-xs mt-1.5 ${CONCERN_DETAIL[c.status]}`}>{c.detail}</div>
                     {c.history && <div className="text-[11px] text-zinc-500 mt-1">추이 {c.history}</div>}
                     {c.tip && <div className="text-[11px] text-zinc-600 mt-1">{c.tip}</div>}
                   </button>
@@ -376,7 +403,7 @@ function HomeScreen({ exams, prefs, report, onReport, onReview, onItem, onPrefs 
                     {report.createdAt} 작성 · 검진 {report.examCount}회 기준
                     {reportStale && <span className="text-amber-300"> · 새 기록이 있어요</span>}
                   </div>
-                  <div className="text-xs text-zinc-300 leading-relaxed whitespace-pre-wrap">{report.text}</div>
+                  <ReportView report={report} />
                 </>
               ) : (
                 <div className="text-xs text-zinc-500">전체 기록을 바탕으로 요약, 생활 습관, 다음 진료 때 물어볼 것을 정리해 드려요.</div>
@@ -419,6 +446,55 @@ function HomeScreen({ exams, prefs, report, onReport, onReview, onItem, onPrefs 
           </Section>
         </>
       )}
+    </div>
+  );
+}
+
+function ReportView({ report }) {
+  // Reports saved before the structured format are plain text.
+  if (!report.data) return <div className="text-xs text-zinc-300 leading-relaxed whitespace-pre-wrap">{report.text}</div>;
+  const { summary, concerns, improved, actions, questions } = report.data;
+  const list = (title, items, color) =>
+    items.length > 0 && (
+      <div className="mt-3">
+        <div className={`text-[11px] font-semibold mb-1 ${color}`}>{title}</div>
+        <ul className="space-y-1">
+          {items.map((t, i) => (
+            <li key={i} className="text-xs text-zinc-300 leading-relaxed pl-3 relative">
+              <span className="absolute left-0 text-zinc-600">·</span>
+              {t}
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  return (
+    <div>
+      <div className="text-xs text-zinc-200 leading-relaxed">{summary}</div>
+      {concerns.length > 0 && (
+        <div className="mt-3">
+          <div className="flex items-center gap-1 text-[11px] font-semibold text-rose-400 mb-1.5">
+            <AlertTriangle className="w-3.5 h-3.5" /> 신경 써야 할 부분
+          </div>
+          <div className="space-y-1.5">
+            {concerns.map((c, i) => {
+              const high = c.level === "high";
+              return (
+                <div
+                  key={i}
+                  className={`rounded-md px-3 py-2 border-l-4 ${high ? "bg-rose-500/10 border-rose-500" : "bg-amber-500/5 border-amber-400"}`}
+                >
+                  <div className={`text-xs font-semibold ${high ? "text-rose-300" : "text-amber-200"}`}>{c.title}</div>
+                  <div className={`text-xs leading-relaxed mt-0.5 ${high ? "text-rose-100/90" : "text-amber-100/80"}`}>{c.detail}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+      {list("좋아진 부분", improved, "text-teal-300")}
+      {list("생활에서 해볼 것", actions, "text-zinc-400")}
+      {list("다음 진료 때 물어볼 것", questions, "text-zinc-400")}
     </div>
   );
 }
@@ -474,7 +550,7 @@ function TrendList({ exams, sex, onItem }) {
                 </div>
                 {nums.length >= 2 && <Sparkline data={nums} color={STATUS_COLOR[status] || "#a1a1aa"} />}
                 <div className="w-16 text-right">
-                  <div className="text-sm text-zinc-100 tabular-nums">{fmt(last.value)}</div>
+                  <div className={`text-sm tabular-nums ${VALUE_COLOR[status] || "text-zinc-100"}`}>{fmt(last.value)}</div>
                   <div className="text-[10px] text-zinc-600">{item.unit}</div>
                 </div>
                 <div className="w-4"><TrendIcon trend={trend} /></div>
@@ -814,14 +890,14 @@ function ReviewScreen({ initial, existingDates, sex, onCancel, onSave, onDelete 
 // Preferences: sex, API key, backup
 // ---------------------------------------------------------------------------
 
-function PrefsScreen({ prefs, exams, onSave, onImport, onBack }) {
+function PrefsScreen({ prefs, exams, report, onSave, onImport, onBack }) {
   const [sex, setSex] = useState(prefs.sex);
   const [apiKey, setApiKey] = useState(prefs.apiKey);
   const [note, setNote] = useState("");
   const importRef = useRef(null);
 
   const exportBackup = () => {
-    const blob = new Blob([JSON.stringify({ version: 1, exams }, null, 2)], { type: "application/json" });
+    const blob = new Blob([JSON.stringify({ version: 1, exams, ...(report ? { report } : {}) }, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -837,8 +913,8 @@ function PrefsScreen({ prefs, exams, onSave, onImport, onBack }) {
     try {
       const data = JSON.parse(await file.text());
       if (!Array.isArray(data.exams)) throw new Error();
-      onImport(data.exams);
-      setNote(`${data.exams.length}개 검진 기록을 불러왔어요.`);
+      onImport(data.exams, data.report);
+      setNote(`${data.exams.length}개 검진 기록${data.report?.data ? "과 AI 리포트" : ""}를 불러왔어요.`);
     } catch {
       setNote("백업 파일 형식이 올바르지 않아요.");
     }
