@@ -27,28 +27,49 @@ async function fileBlock(file) {
   return { type: "image", source: { type: "base64", media_type: mediaType, data } };
 }
 
+const ITEM_SCHEMA = {
+  type: "object",
+  properties: {
+    key: { type: "string", description: "표준 항목 key, 해당 없으면 \"other\"" },
+    name: { type: "string", description: "결과지에 적힌 항목명" },
+    value: { type: "string", description: "결과값. 숫자 항목은 숫자만 (예: \"104\"), 정성 항목은 결과 그대로 (예: \"음성\")" },
+    unit: { type: "string" },
+    ref_range: { type: "string", description: "결과지에 적힌 참고치, 없으면 빈 문자열" },
+  },
+  required: ["key", "name", "value", "unit", "ref_range"],
+  additionalProperties: false,
+};
+
+const FINDING_SCHEMA = {
+  type: "object",
+  properties: {
+    area: { type: "string", description: "검사 이름 (예: 상복부초음파, 관상동맥 CT, 요추 X선, 종합소견)" },
+    text: { type: "string", description: "소견 내용을 한국어로 간결하게" },
+  },
+  required: ["area", "text"],
+  additionalProperties: false,
+};
+
 const EXTRACTION_SCHEMA = {
   type: "object",
   properties: {
-    exam_date: { type: "string", description: "검진일 YYYY-MM-DD. 모르면 빈 문자열" },
-    hospital: { type: "string", description: "검진 기관명. 모르면 빈 문자열" },
-    items: {
+    exams: {
       type: "array",
+      description: "검사일별로 하나씩",
       items: {
         type: "object",
         properties: {
-          key: { type: "string", description: "표준 항목 key, 해당 없으면 \"other\"" },
-          name: { type: "string", description: "결과지에 적힌 항목명" },
-          value: { type: "string", description: "결과값. 숫자 항목은 숫자만 (예: \"104\"), 정성 항목은 결과 그대로 (예: \"음성\")" },
-          unit: { type: "string" },
-          ref_range: { type: "string", description: "결과지에 적힌 참고치, 없으면 빈 문자열" },
+          exam_date: { type: "string", description: "검사일 YYYY-MM-DD. 모르면 빈 문자열" },
+          hospital: { type: "string", description: "검사 기관명. 모르면 빈 문자열" },
+          items: { type: "array", items: ITEM_SCHEMA },
+          findings: { type: "array", items: FINDING_SCHEMA },
         },
-        required: ["key", "name", "value", "unit", "ref_range"],
+        required: ["exam_date", "hospital", "items", "findings"],
         additionalProperties: false,
       },
     },
   },
-  required: ["exam_date", "hospital", "items"],
+  required: ["exams"],
   additionalProperties: false,
 };
 
@@ -56,18 +77,25 @@ const catalogText = ITEMS.map(
   (i) => `- ${i.key}: ${i.name}${i.unit ? ` [${i.unit}]` : ""}${i.aliases.length ? ` (별칭: ${i.aliases.join(", ")})` : ""}`
 ).join("\n");
 
-const EXTRACTION_PROMPT = `첨부한 건강검진 결과지에서 검사 결과 수치를 모두 뽑아 주세요.
+const EXTRACTION_PROMPT = `첨부한 건강검진·검사 결과지에서 결과를 모두 뽑아 주세요.
 
+검사일별로 나누기:
+- 결과지에 여러 검사일의 값이 나란히 있으면(예: 2026/06/19, 2025/08/19, 2024/07/19 열) 검사일마다 exams 항목을 하나씩 만들고, 각 날짜의 값을 그 항목에 넣으세요.
+- 사진이나 파일이 여러 장이고 검사일이 서로 다르면(예: CT 검사일과 혈액검사 시행일) 역시 날짜별로 나누세요. 검사일은 처방일·시행일·검사일시를 쓰고, 출력일이나 판독일은 쓰지 마세요.
+
+수치 항목(items):
 아래 표준 항목 중 하나에 해당하면 그 key를 쓰고, 해당하지 않는 검사는 key를 "other"로 두세요.
-표준 항목:
 ${catalogText}
 
-규칙:
-- 이번 검진의 결과값만 뽑으세요. 결과지에 과거 연도 값이 같이 나와 있으면 가장 최근 검진일의 값만 씁니다.
-- 표준 항목의 단위와 결과지 단위가 다르면 표준 단위로 환산한 값과 표준 단위를 쓰세요.
+- 표준 항목의 단위와 결과지 단위가 다르면 표준 단위로 환산한 값과 표준 단위를 쓰세요. 결과지 단위 표기가 명백히 잘못된 경우(예: eGFR이 mg/dL로 적힘)는 표준 단위를 쓰면 됩니다.
+- 같은 검사가 직접 측정값과 계산값으로 둘 다 있으면(예: LDL Cholesterol과 LDL C(계산값)) 직접 측정값을 표준 항목에 넣고, 계산값은 "other"로 두세요.
 - 혈압이 "120/80"처럼 함께 적혀 있으면 sbp와 dbp로 나눠 주세요.
-- 판정 문구(정상A, 정상B, 질환의심 등)나 문진 답변은 항목으로 넣지 마세요.
-- 읽을 수 없거나 비어 있는 값은 넣지 마세요.`;
+- 판정 문구(정상A, 정상B, 질환의심 등)와 문진 답변은 항목으로 넣지 마세요. 읽을 수 없거나 비어 있는 값도 넣지 마세요.
+
+소견(findings):
+- 초음파, 내시경, X선, CT, 심전도 같은 영상·기능 검사 결과와 의사 종합소견 중 이상이 있거나 추적 관찰이 필요한 내용을 검사별로 한 줄씩 간결하게 적으세요. 수치·크기·부위(예: 간 우엽 결절 6mm, pLCX 중등도 협착)는 빠뜨리지 마세요.
+- 이미 items에 들어간 수치를 되풀이하는 소견(예: "콜레스테롤이 높습니다")이나 단순히 "정상"인 검사는 넣지 마세요.
+- 이름, 주민번호, 주소, 연락처 같은 개인정보는 어디에도 넣지 마세요.`;
 
 function guardRefusal(message) {
   if (message.stop_reason === "refusal") {
@@ -90,8 +118,9 @@ function friendlyError(e) {
   return e;
 }
 
-// Reads one checkup's PDF (or photos of its pages) and returns
-// { exam_date, hospital, items: [{ key, name, value, unit, ref_range }] }.
+// Reads checkup PDFs or photos and returns { exams: [{ exam_date, hospital,
+// items: [{ key, name, value, unit, ref_range }], findings: [{ area, text }] }] },
+// one entry per test date found in the files.
 export async function extractCheckup(apiKey, files) {
   try {
     const blocks = await Promise.all(files.map(fileBlock));
@@ -114,7 +143,7 @@ export async function extractCheckup(apiKey, files) {
   }
 }
 
-const SUMMARY_PROMPT = `아래는 한 사람의 연도별 건강검진 결과입니다.
+const SUMMARY_PROMPT = `아래는 한 사람의 연도별 건강검진 수치와 검사 소견입니다.
 
 {history}
 

@@ -8,6 +8,7 @@
 //   normal / caution: [min, max] bands (null = open-ended). Anything outside
 //   caution is "abnormal". Either may be split by sex: { M: [...], F: [...] }.
 //   rangeLabel: optional display text for the normal range when the raw band reads awkwardly.
+//   weight: extra priority when out of range, for findings that matter beyond their band.
 
 export const CATEGORIES = ["신체계측", "혈압", "당뇨", "이상지질", "간기능", "신장", "빈혈·혈액", "기타", "종양표지자"];
 
@@ -53,6 +54,9 @@ export const ITEMS = [
   { key: "alt", name: "ALT(SGPT)", unit: "U/L", category: "간기능", aliases: ["ALT", "SGPT", "GPT"],
     bad: "high", normal: [null, 35], caution: [null, 45],
     tip: "지방간이 있으면 ALT가 먼저 오르는 경우가 많습니다." },
+  { key: "tbil", name: "총빌리루빈", unit: "mg/dL", category: "간기능", aliases: ["T.Bilirubin", "Total Bilirubin", "T-Bil"],
+    bad: "high", normal: [null, 1.2], caution: [null, 2.0],
+    tip: "약간 높은 것만으로는 문제가 없는 경우(길버트 증후군, 공복 등)가 많지만 계속 오르면 진료를 받아 보세요." },
   { key: "ggt", name: "감마지티피(γ-GTP)", unit: "U/L", category: "간기능", aliases: ["GGT", "γ-GTP", "r-GTP", "감마GTP"],
     bad: "high", normal: { M: [null, 63], F: [null, 35] }, caution: { M: [null, 77], F: [null, 45] },
     tip: "음주량을 잘 반영하는 수치입니다." },
@@ -71,6 +75,9 @@ export const ITEMS = [
   { key: "plt", name: "혈소판", unit: "10³/µL", category: "빈혈·혈액", aliases: ["PLT", "Platelet"],
     bad: "both", normal: [150, 450], caution: [130, 500] },
 
+  { key: "cac", name: "관상동맥 석회화 점수", unit: "", category: "기타", aliases: ["Agatston Score", "Calcium Score", "CAC"],
+    bad: "high", normal: [null, 0], caution: [null, 99], rangeLabel: "0", weight: 1,
+    tip: "0이면 석회화 없음, 1~99 경도, 100~399 중등도, 400 이상 고도입니다. 점수가 있으면 콜레스테롤·혈압 관리를 더 엄격히 하는 경우가 많습니다." },
   { key: "uric_acid", name: "요산", unit: "mg/dL", category: "기타", aliases: ["Uric Acid"],
     bad: "high", normal: { M: [null, 7.0], F: [null, 6.0] }, caution: { M: [null, 8.0], F: [null, 7.0] },
     tip: "높으면 통풍 위험이 커집니다." },
