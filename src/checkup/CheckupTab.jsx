@@ -176,6 +176,7 @@ export default function CheckupTab() {
     return (
       <ReviewScreen
         initial={view.drafts}
+        existingDates={new Set(exams.map((e) => e.date))}
         sex={prefs.sex}
         onCancel={() => setView({ name: "home" })}
         onSave={saveExams}
@@ -590,18 +591,22 @@ function BackButton({ onClick }) {
 // Review / edit one checkup
 // ---------------------------------------------------------------------------
 
-function ReviewScreen({ initial, sex, onCancel, onSave, onDelete }) {
-  const [drafts, setDrafts] = useState(initial);
-  const [active, setActive] = useState(0);
+function ReviewScreen({ initial, existingDates, sex, onCancel, onSave, onDelete }) {
+  const isNew = !initial[0].id;
+  // A new report usually repeats earlier years next to this year's column.
+  // Those dates are already saved, so they start out excluded; re-reading
+  // them would only duplicate findings with slightly different wording.
+  const isExisting = (d) => isNew && existingDates.has(d.date);
+  const [drafts, setDrafts] = useState(() =>
+    initial.map((d) => ({ ...d, skip: initial.length > 1 && isExisting(d) }))
+  );
+  const [active, setActive] = useState(() => Math.max(0, drafts.findIndex((d) => !d.skip)));
   const [addKey, setAddKey] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   const draft = drafts[active];
   const setDraft = (fn) => setDrafts((all) => all.map((d, i) => (i === active ? fn(d) : d)));
-  const removeDraft = () => {
-    setDrafts((all) => all.filter((_, i) => i !== active));
-    setActive(0);
-  };
+  const toggleSkip = () => setDraft((d) => ({ ...d, skip: !d.skip }));
   const setFinding = (rid, patch) =>
     setDraft((d) => ({ ...d, findings: d.findings.map((f) => (f.rid === rid ? { ...f, ...patch } : f)) }));
   const removeFinding = (rid) => setDraft((d) => ({ ...d, findings: d.findings.filter((f) => f.rid !== rid) }));
@@ -625,10 +630,11 @@ function ReviewScreen({ initial, sex, onCancel, onSave, onDelete }) {
     .sort((a, b) => ITEMS.indexOf(ITEM_BY_KEY[a.key]) - ITEMS.indexOf(ITEM_BY_KEY[b.key]));
   const otherRows = draft.rows.filter((r) => !ITEM_BY_KEY[r.key]);
   const usedKeys = new Set(standardRows.map((r) => r.key));
-  const isNew = !initial[0].id;
   const validDate = (d) => /^\d{4}-\d{2}-\d{2}$/.test(d.date);
   const valid = validDate(draft);
-  const allValid = drafts.every(validDate);
+  const included = drafts.filter((d) => !d.skip);
+  const canSave = included.length > 0 && included.every(validDate);
+  const skippedExisting = drafts.filter((d) => d.skip && isExisting(d)).length;
 
   return (
     <div className="px-5 pt-6">
@@ -640,20 +646,38 @@ function ReviewScreen({ initial, sex, onCancel, onSave, onDelete }) {
 
       {drafts.length > 1 && (
         <div className="mb-4">
-          <div className="text-[11px] text-zinc-500 mb-1.5">검사일 {drafts.length}개를 찾았어요. 날짜를 눌러 각각 확인하세요.</div>
+          <div className="text-[11px] text-zinc-500 mb-1.5">
+            검사일 {drafts.length}개를 찾았어요. 날짜를 눌러 각각 확인하세요.
+            {skippedExisting > 0 && ` 이미 저장된 ${skippedExisting}개는 빼 두었어요.`}
+          </div>
           <div className="flex flex-wrap gap-1.5">
             {drafts.map((d, i) => (
               <button
                 key={i}
                 onClick={() => setActive(i)}
                 className={`px-3 py-1.5 rounded-full text-xs ${
-                  i === active ? "bg-orange-500 text-zinc-950" : validDate(d) ? "bg-zinc-900 text-zinc-400" : "bg-amber-500/15 text-amber-300"
+                  i === active
+                    ? "bg-orange-500 text-zinc-950"
+                    : d.skip
+                      ? "bg-zinc-900 text-zinc-600 line-through"
+                      : validDate(d)
+                        ? "bg-zinc-900 text-zinc-300"
+                        : "bg-amber-500/15 text-amber-300"
                 }`}
               >
                 {d.date || "날짜 없음"}
+                {isExisting(d) && " · 저장됨"}
               </button>
             ))}
           </div>
+        </div>
+      )}
+
+      {isExisting(draft) && (
+        <div className="text-[11px] text-amber-300 bg-amber-500/10 rounded-md px-3 py-2 mb-3">
+          {draft.skip
+            ? "이미 저장된 날짜라 이번에는 저장하지 않아요. 기존 기록에 합치려면 아래 '이 날짜도 저장하기'를 누르세요."
+            : "이미 저장된 날짜예요. 저장하면 기존 기록에 합쳐지고, 같은 항목은 이번 값으로 바뀌어요."}
         </div>
       )}
 
@@ -763,15 +787,15 @@ function ReviewScreen({ initial, sex, onCancel, onSave, onDelete }) {
       </Section>
 
       <button
-        onClick={() => onSave(drafts.map(examFromDraft))}
-        disabled={!allValid}
+        onClick={() => onSave(included.map(examFromDraft))}
+        disabled={!canSave}
         className="w-full bg-orange-500 text-zinc-950 font-semibold text-sm rounded-md py-3 disabled:opacity-40 mb-3"
       >
-        {drafts.length > 1 ? `${drafts.length}개 검사일 모두 저장` : "저장"}
+        {drafts.length > 1 ? `${included.length}개 검사일 저장` : "저장"}
       </button>
       {drafts.length > 1 && (
-        <button onClick={removeDraft} className="w-full text-xs text-zinc-500 py-2 mb-2">
-          이 날짜({draft.date || "날짜 없음"})는 저장하지 않기
+        <button onClick={toggleSkip} className="w-full text-xs text-zinc-500 py-2 mb-2">
+          {draft.skip ? `이 날짜(${draft.date || "날짜 없음"})도 저장하기` : `이 날짜(${draft.date || "날짜 없음"})는 저장하지 않기`}
         </button>
       )}
       {onDelete && (
