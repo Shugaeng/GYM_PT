@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import { storage } from "./storage";
+import CheckupTab from "./checkup/CheckupTab";
 import {
   Calendar as CalendarIcon,
   Dumbbell,
@@ -16,6 +17,7 @@ import {
   RotateCcw,
   PlayCircle,
   Moon,
+  HeartPulse,
 } from "lucide-react";
 
 // ---------------------------------------------------------------------------
@@ -376,6 +378,7 @@ export default function PTApp() {
             onLevelChange={(level) => persistSettings({ ...settings, level })}
           />
         )}
+        {tab === "checkup" && <CheckupTab />}
         {tab === "settings" && (
           <SettingsTab settings={settings} onSave={persistSettings} note={saveNote} setNote={setSaveNote} />
         )}
@@ -384,6 +387,7 @@ export default function PTApp() {
       <nav className="fixed bottom-0 left-0 right-0 bg-zinc-950/95 backdrop-blur border-t border-zinc-900 flex">
         <TabButton icon={CalendarIcon} label="기록" active={tab === "calendar"} onClick={() => setTab("calendar")} />
         <TabButton icon={Dumbbell} label="추천" active={tab === "recommend"} onClick={() => setTab("recommend")} />
+        <TabButton icon={HeartPulse} label="검진" active={tab === "checkup"} onClick={() => setTab("checkup")} />
         <TabButton icon={SettingsIcon} label="설정" active={tab === "settings"} onClick={() => setTab("settings")} />
       </nav>
     </div>
